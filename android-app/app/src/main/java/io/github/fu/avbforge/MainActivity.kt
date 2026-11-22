@@ -1,5 +1,6 @@
 package io.github.fu.avbforge
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,28 +18,29 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -48,6 +50,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -58,12 +61,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.fu.avbforge.ui.AvbForgeViewModel
-import io.github.fu.avbforge.ui.components.FloatingPillNavBar
 import io.github.fu.avbforge.ui.components.LiveTerminalSheet
+import io.github.fu.avbforge.ui.components.M3EFloatingNavBar
 import io.github.fu.avbforge.ui.components.NavTabItem
 import io.github.fu.avbforge.ui.screens.DashboardScreen
 import io.github.fu.avbforge.ui.screens.DsuScreen
@@ -77,8 +80,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            AVBForgeTheme {
-                AvbForgeApp()
+            val prefs = remember { getSharedPreferences("avbforge_prefs", Context.MODE_PRIVATE) }
+            var useDynamicColor by remember { mutableStateOf(prefs.getBoolean("dynamic_color", false)) }
+
+            AVBForgeTheme(useDynamicColor = useDynamicColor) {
+                AvbForgeApp(
+                    useDynamicColor = useDynamicColor,
+                    onToggleDynamicColor = {
+                        useDynamicColor = !useDynamicColor
+                        prefs.edit().putBoolean("dynamic_color", useDynamicColor).apply()
+                    },
+                )
             }
         }
     }
@@ -86,12 +98,17 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AvbForgeApp(vm: AvbForgeViewModel = viewModel()) {
+fun AvbForgeApp(
+    useDynamicColor: Boolean,
+    onToggleDynamicColor: () -> Unit,
+    vm: AvbForgeViewModel = viewModel(),
+) {
     val state by vm.state.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
     var showTerminal by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     val notify: (String) -> Unit = { msg ->
         scope.launch {
@@ -100,36 +117,57 @@ fun AvbForgeApp(vm: AvbForgeViewModel = viewModel()) {
         }
     }
 
+    // Show non-busy completion messages cleanly as snackbars instead of an ugly permanent gray bar
+    var lastNotifiedStatus by remember { mutableStateOf(state.statusMessage) }
+    LaunchedEffect(state.statusMessage, state.busy) {
+        if (!state.busy && state.statusMessage != lastNotifiedStatus && state.statusMessage != "就绪") {
+            lastNotifiedStatus = state.statusMessage
+            notify(state.statusMessage)
+        }
+    }
+
     val navItems = remember {
         listOf(
-            NavTabItem("体检", Icons.Rounded.Shield),
-            NavTabItem("密钥", Icons.Rounded.Key),
-            NavTabItem("工坊", Icons.Rounded.Build),
-            NavTabItem("DSU", Icons.Rounded.SystemUpdate),
+            NavTabItem("体检", "AVBForge", Icons.Rounded.Shield),
+            NavTabItem("密钥", "密钥库", Icons.Rounded.Key),
+            NavTabItem("工坊", "镜像工坊", Icons.Rounded.Build),
+            NavTabItem("DSU", "DSU 工作室", Icons.Rounded.SystemUpdate),
         )
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = {
             SnackbarHost(
                 hostState = snackbarHostState,
-                modifier = Modifier.padding(bottom = 84.dp),
+                modifier = Modifier.padding(bottom = 86.dp),
             )
         },
         topBar = {
-            CenterAlignedTopAppBar(
-                modifier = Modifier.statusBarsPadding(),
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = Color.Transparent,
-                ),
+            LargeTopAppBar(
                 title = {
                     Text(
-                        text = "AVBForge",
-                        style = MaterialTheme.typography.titleLarge,
+                        text = navItems[tab].title,
+                        style = MaterialTheme.typography.headlineMedium,
                     )
                 },
+                colors = TopAppBarDefaults.largeTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
+                scrollBehavior = scrollBehavior,
                 actions = {
+                    IconButton(onClick = {
+                        onToggleDynamicColor()
+                        notify(if (!useDynamicColor) "已切换为系统莫奈动态取色" else "已切换为内置 M3E 蓝绿主题")
+                    }) {
+                        Icon(
+                            Icons.Rounded.Palette,
+                            contentDescription = "切换主题配色",
+                            tint = if (useDynamicColor) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     IconButton(onClick = { showTerminal = true }) {
                         BadgedBox(
                             badge = {
@@ -151,83 +189,97 @@ fun AvbForgeApp(vm: AvbForgeViewModel = viewModel()) {
                 .padding(top = padding.calculateTopPadding())
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Smooth Animated Progress Bar
+                // Sleek floating progress pill — ONLY visible when an operation is running
                 AnimatedVisibility(
                     visible = state.busy,
                     enter = fadeIn() + expandVertically(),
                     exit = fadeOut() + shrinkVertically(),
                 ) {
-                    val p = state.progress
-                    if (p != null && p.total > 0) {
-                        val animatedProgress by animateFloatAsState(
-                            targetValue = (p.current.toFloat() / p.total.toFloat()).coerceIn(0f, 1f),
-                            animationSpec = spring(stiffness = Spring.StiffnessLow),
-                            label = "progress",
-                        )
-                        LinearProgressIndicator(
-                            progress = { animatedProgress },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
-                                .clip(CircleShape),
-                        )
-                    } else {
-                        LinearProgressIndicator(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
-                                .clip(CircleShape),
-                        )
-                    }
-                }
-
-                // Expressive Status / Error Pill Banner
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = if (state.errorBanner != null) {
-                        MaterialTheme.colorScheme.errorContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHigh
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
                     ) {
-                        Text(
-                            text = state.errorBanner ?: state.statusMessage,
-                            color = if (state.errorBanner != null) {
-                                MaterialTheme.colorScheme.onErrorContainer
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = state.statusMessage,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            val p = state.progress
+                            if (p != null && p.total > 0) {
+                                val animatedProgress by animateFloatAsState(
+                                    targetValue = (p.current.toFloat() / p.total.toFloat()).coerceIn(0f, 1f),
+                                    animationSpec = spring(stiffness = Spring.StiffnessLow),
+                                    label = "progress",
+                                )
+                                LinearProgressIndicator(
+                                    progress = { animatedProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(CircleShape),
+                                )
                             } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (state.errorBanner != null) {
-                            IconButton(onClick = { vm.clearError() }) {
-                                Icon(
-                                    Icons.Rounded.Close,
-                                    contentDescription = "关闭提示",
-                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                LinearProgressIndicator(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(CircleShape),
                                 )
                             }
                         }
                     }
                 }
 
-                // Directional Expressive Screen Transitions
+                // Dismissible Error Banner — ONLY visible when an error occurs
+                AnimatedVisibility(
+                    visible = state.errorBanner != null,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically(),
+                ) {
+                    state.errorBanner?.let { err ->
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 16.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = err,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                IconButton(onClick = { vm.clearError() }) {
+                                    Icon(
+                                        Icons.Rounded.Close,
+                                        contentDescription = "关闭",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Smooth horizontal screen switch
                 AnimatedContent(
                     targetState = tab,
                     modifier = Modifier.weight(1f),
                     transitionSpec = {
                         val dir = if (targetState > initialState) 1 else -1
-                        (slideInHorizontally(animationSpec = tween(260)) { it / 6 * dir } + fadeIn(tween(220)))
+                        (slideInHorizontally(animationSpec = tween(240)) { it / 8 * dir } + fadeIn(tween(200)))
                             .togetherWith(
-                                slideOutHorizontally(animationSpec = tween(220)) { -it / 8 * dir } + fadeOut(tween(180))
+                                slideOutHorizontally(animationSpec = tween(180)) { -it / 10 * dir } + fadeOut(tween(150))
                             )
                     },
                     label = "tab_content",
@@ -241,8 +293,8 @@ fun AvbForgeApp(vm: AvbForgeViewModel = viewModel()) {
                 }
             }
 
-            // Floating M3 Expressive Pill Navigation Bar
-            FloatingPillNavBar(
+            // Floating M3E Capsule Nav Bar
+            M3EFloatingNavBar(
                 items = navItems,
                 selectedIndex = tab,
                 onSelect = { tab = it },

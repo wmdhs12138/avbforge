@@ -23,16 +23,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.StopCircle
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,11 +52,13 @@ import androidx.compose.ui.unit.dp
 import io.github.fu.avbforge.core.UriPathResolver
 import io.github.fu.avbforge.ui.AvbForgeViewModel
 import io.github.fu.avbforge.ui.UiState
-import io.github.fu.avbforge.ui.components.ExpressiveCard
-import io.github.fu.avbforge.ui.components.ExpressivePathField
-import io.github.fu.avbforge.ui.components.ExpressivePillChip
-import io.github.fu.avbforge.ui.components.ExpressivePrimaryButton
-import io.github.fu.avbforge.ui.components.StepBadgeHeader
+import io.github.fu.avbforge.ui.components.M3EGroupRow
+import io.github.fu.avbforge.ui.components.M3EHeroCard
+import io.github.fu.avbforge.ui.components.M3EPillChip
+import io.github.fu.avbforge.ui.components.M3EPrimaryButton
+import io.github.fu.avbforge.ui.components.M3ESectionLabel
+import io.github.fu.avbforge.ui.components.m3eGroupShape
+import java.io.File
 import kotlin.math.roundToInt
 
 @Composable
@@ -70,10 +75,9 @@ fun DsuScreen(
 
     val gsiPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val resolved = UriPathResolver.resolveFileUri(ctx, uri)
-            if (resolved != null) {
-                gsiInputPath = resolved
-                onNotify("已选择 GSI 镜像文件")
+            UriPathResolver.resolveFileUri(ctx, uri)?.let {
+                gsiInputPath = it
+                onNotify("已选择 GSI：${File(it).name}")
             }
         }
     }
@@ -81,33 +85,79 @@ fun DsuScreen(
     Column(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Step 1: Sign GSI
-        ExpressiveCard {
-            StepBadgeHeader(
-                stepNumber = "01",
-                title = "GSI 极速自签名",
-                subtitle = "支持 .img / .img.xz / .img.gz 与 Android Sparse，多线程计算 SHA-256 Hashtree",
-            )
-            ExpressivePathField(
-                value = gsiInputPath,
-                onValueChange = { gsiInputPath = it },
-                label = "选择或输入 arm64-ab GSI 文件",
-                onPick = { gsiPicker.launch(arrayOf("*/*")) },
-            )
-            ExpressivePrimaryButton(
-                text = "流式解压、计算 Hashtree 并签名验签",
+        // DSU Status Hero Card with Inline Controls
+        M3EHeroCard(
+            title = "DSU 状态：${state.dsuStatusText}",
+            subtitle = "无损隔离运行第三方 GSI，不影响原厂系统与用户数据",
+            icon = Icons.Rounded.SystemUpdate,
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                FilledTonalButton(
+                    onClick = { vm.runDsuSimple("status") },
+                    enabled = !state.busy,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.size(4.dp))
+                    Text("刷新")
+                }
+                FilledTonalButton(
+                    onClick = { vm.runDsuSimple("disable") },
+                    enabled = !state.busy,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Rounded.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.size(4.dp))
+                    Text("禁用")
+                }
+                FilledTonalButton(
+                    onClick = { confirmWipe = true },
+                    enabled = !state.busy,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Rounded.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.size(4.dp))
+                    Text("清理")
+                }
+            }
+        }
+
+        // Step 1: Pick & Sign GSI (Clean Group Row!)
+        M3ESectionLabel("体验第三方 GSI")
+        M3EGroupRow(
+            title = if (gsiInputPath.isBlank()) "选择 arm64-ab GSI 镜像" else File(gsiInputPath).name,
+            subtitle = gsiInputPath.ifBlank { "支持 .img / .img.xz / .img.gz 与 Android Sparse" },
+            icon = Icons.Rounded.FolderOpen,
+            shape = m3eGroupShape(0, 1),
+            showChevron = true,
+            monospaceSubtitle = gsiInputPath.isNotBlank(),
+            onClick = { gsiPicker.launch(arrayOf("*/*")) },
+        )
+
+        AnimatedVisibility(
+            visible = gsiInputPath.isNotBlank(),
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            M3EPrimaryButton(
+                text = "多线程计算 Hashtree 并签名验签",
                 icon = Icons.Rounded.Bolt,
                 onClick = { vm.signGsiImage(gsiInputPath.trim()) },
-                enabled = !state.busy && gsiInputPath.isNotBlank(),
+                enabled = !state.busy,
                 loading = state.busy,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
 
-        // Step 2: Install to DSU
+        // Step 2: Signed GSI Ready -> Configure & Install
         AnimatedVisibility(
             visible = state.lastGsiReport != null,
             enter = fadeIn() + expandVertically(),
@@ -115,68 +165,74 @@ fun DsuScreen(
         ) {
             state.lastGsiReport?.let { rep ->
                 val gib = userdataSlider.roundToInt()
-                ExpressiveCard(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-                    borderColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f),
-                ) {
-                    StepBadgeHeader(
-                        stepNumber = "02",
-                        title = "已签名 GSI 写入 DSU",
-                        subtitle = "AVB 验签已通过，不修改原厂 super 与 userdata",
-                    )
-                    ExpressivePillChip(
-                        text = "Root: ${rep.rootDigest.take(18)}...",
-                        icon = Icons.Rounded.CheckCircle,
-                        copyValue = rep.rootDigest,
-                        onCopied = { onNotify("已复制 Hashtree Root Digest") },
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("分配给 GSI 的 Userdata 空间", style = MaterialTheme.typography.labelLarge)
-                            ExpressivePillChip(
-                                text = "$gib GiB",
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                        }
-                        Slider(
-                            value = userdataSlider,
-                            onValueChange = { userdataSlider = it },
-                            valueRange = 4f..64f,
-                            steps = 14,
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    M3ESectionLabel("安装已签名 GSI")
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        M3EGroupRow(
+                            title = "AVB 签名与 Hashtree 校验通过",
+                            subtitle = "Root: ${rep.rootDigest.take(24)}...",
+                            icon = Icons.Rounded.CheckCircle,
+                            iconTint = MaterialTheme.colorScheme.secondary,
+                            iconBg = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = m3eGroupShape(0, 3),
+                            monospaceSubtitle = true,
+                            onClick = { onNotify("已签镜像：${rep.outputPath}") },
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(8, 16, 32).forEach { preset ->
-                                ExpressivePillChip(
-                                    text = "${preset}G",
-                                    containerColor = if (gib == preset) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                    contentColor = if (gib == preset) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                                    onClick = { userdataSlider = preset.toFloat() },
+                        Surface(
+                            shape = m3eGroupShape(1, 3),
+                            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(Icons.Rounded.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                        Text("独立 Userdata 大小", style = MaterialTheme.typography.titleMedium)
+                                    }
+                                    M3EPillChip(
+                                        text = "$gib GiB",
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    )
+                                }
+                                Slider(
+                                    value = userdataSlider,
+                                    onValueChange = { userdataSlider = it },
+                                    valueRange = 4f..64f,
+                                    steps = 14,
                                 )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    listOf(8, 16, 32).forEach { preset ->
+                                        M3EPillChip(
+                                            text = "${preset}G",
+                                            containerColor = if (gib == preset) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            contentColor = if (gib == preset) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                                            onClick = { userdataSlider = preset.toFloat() },
+                                        )
+                                    }
+                                }
                             }
                         }
+                        M3EGroupRow(
+                            title = "单次启动模式（-s 防变砖）",
+                            subtitle = "如 GSI 启动异常，强制重启一次自动回退 OriginOS",
+                            icon = Icons.Rounded.Shield,
+                            shape = m3eGroupShape(2, 3),
+                            trailing = {
+                                Switch(checked = singleBoot, onCheckedChange = { singleBoot = it })
+                            },
+                        )
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("单次启动模式（-s 防变砖）", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "开启后如 GSI 启动异常，强制重启一次自动回退 OriginOS",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Switch(checked = singleBoot, onCheckedChange = { singleBoot = it })
-                    }
-                    ExpressivePrimaryButton(
-                        text = "通过原生 gsi_tool 安装 DSU",
+
+                    M3EPrimaryButton(
+                        text = "通过原生 gsi_tool 安装到 DSU",
                         icon = Icons.Rounded.SystemUpdate,
                         onClick = {
                             vm.installSignedDsu(
@@ -192,60 +248,7 @@ fun DsuScreen(
             }
         }
 
-        // Control Deck
-        ExpressiveCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("DSU 控制台", style = MaterialTheme.typography.titleMedium)
-                ExpressivePillChip(
-                    text = state.dsuStatusText,
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                FilledTonalButton(
-                    onClick = { vm.runDsuSimple("status") },
-                    enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("刷新")
-                }
-                OutlinedButton(
-                    onClick = { vm.runDsuSimple("disable") },
-                    enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("禁用")
-                }
-                OutlinedButton(
-                    onClick = { confirmWipe = true },
-                    enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        Icons.Rounded.DeleteForever,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.size(4.dp))
-                    Text("清理", color = MaterialTheme.colorScheme.error)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(92.dp))
+        Spacer(Modifier.height(96.dp))
     }
 
     if (confirmWipe) {
@@ -253,7 +256,7 @@ fun DsuScreen(
             onDismissRequest = { confirmWipe = false },
             shape = RoundedCornerShape(28.dp),
             title = { Text("彻底清理 DSU？") },
-            text = { Text("将删除 /data/gsi/dsu 下的所有 GSI 镜像和独立 userdata，不影响当前 OriginOS 数据。") },
+            text = { Text("将删除 /data/gsi/dsu 下的所有 GSI 镜像与独立 userdata，不影响当前 OriginOS 数据。") },
             confirmButton = {
                 Button(
                     onClick = {

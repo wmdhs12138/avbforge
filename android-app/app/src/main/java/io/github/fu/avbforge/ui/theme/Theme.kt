@@ -18,85 +18,103 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// Expressive fallback tonal schemes when dynamic color is unavailable
-private val ExpressiveDark = darkColorScheme(
-    primary = Color(0xFFA8C7FA),
-    onPrimary = Color(0xFF062E6F),
-    primaryContainer = Color(0xFF1B4487),
-    onPrimaryContainer = Color(0xFFD3E3FD),
-    secondary = Color(0xFF7FD8BE),
+// Crafted M3 Expressive Ocean-Blue & Emerald-Teal Dark Scheme (AMOLED-friendly)
+private val OceanDarkScheme = darkColorScheme(
+    primary = Color(0xFF7EB3FF),
+    onPrimary = Color(0xFF002D64),
+    primaryContainer = Color(0xFF15386B),
+    onPrimaryContainer = Color(0xFFD7E6FF),
+    secondary = Color(0xFF5EDBBD),
     onSecondary = Color(0xFF00382C),
-    secondaryContainer = Color(0xFF005140),
-    onSecondaryContainer = Color(0xFF9BF5DA),
-    tertiary = Color(0xFFF3B7F0),
-    onTertiary = Color(0xFF4D1F4D),
-    tertiaryContainer = Color(0xFF663566),
-    onTertiaryContainer = Color(0xFFFFD6FC),
-    background = Color(0xFF0F1218),
-    surface = Color(0xFF0F1218),
-    surfaceContainerLowest = Color(0xFF0A0D12),
-    surfaceContainerLow = Color(0xFF171B22),
-    surfaceContainer = Color(0xFF1C2029),
-    surfaceContainerHigh = Color(0xFF262B35),
-    surfaceContainerHighest = Color(0xFF313642),
+    secondaryContainer = Color(0xFF0E3F33),
+    onSecondaryContainer = Color(0xFFB7F6E4),
+    tertiary = Color(0xFFCBB2FF),
+    onTertiary = Color(0xFF331B62),
+    tertiaryContainer = Color(0xFF432976),
+    onTertiaryContainer = Color(0xFFEADDFF),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF5C1518),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = Color(0xFF0D1117),
+    onBackground = Color(0xFFE6ECF5),
+    surface = Color(0xFF0D1117),
+    onSurface = Color(0xFFE6ECF5),
+    onSurfaceVariant = Color(0xFF98A4B8),
+    outline = Color(0xFF404A5A),
+    outlineVariant = Color(0xFF252D3A),
+    surfaceContainerLowest = Color(0xFF151B24),
+    surfaceContainerLow = Color(0xFF18202B),
+    surfaceContainer = Color(0xFF1E2734),
+    surfaceContainerHigh = Color(0xFF253040),
+    surfaceContainerHighest = Color(0xFF2D394C),
 )
 
-private val ExpressiveLight = lightColorScheme(
-    primary = Color(0xFF1A56B8),
+// Crafted M3 Expressive Light Scheme (Crisp white grouped cards on cool #F3F6FB canvas)
+private val OceanLightScheme = lightColorScheme(
+    primary = Color(0xFF1A5FD6),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFD6E3FF),
-    onPrimaryContainer = Color(0xFF001B3F),
-    secondary = Color(0xFF006B55),
+    primaryContainer = Color(0xFFDCE8FF),
+    onPrimaryContainer = Color(0xFF072B66),
+    secondary = Color(0xFF0B7D60),
     onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFF9BF5DA),
-    onSecondaryContainer = Color(0xFF002018),
-    tertiary = Color(0xFF7E497D),
+    secondaryContainer = Color(0xFFCFF4E7),
+    onSecondaryContainer = Color(0xFF003829),
+    tertiary = Color(0xFF6B4BB0),
     onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFFFD6FC),
-    onTertiaryContainer = Color(0xFF330635),
-    background = Color(0xFFF7F9FF),
-    surface = Color(0xFFF7F9FF),
+    tertiaryContainer = Color(0xFFECE0FF),
+    onTertiaryContainer = Color(0xFF280D5E),
+    error = Color(0xFFC62828),
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFFFFE1DF),
+    onErrorContainer = Color(0xFF5A0B0E),
+    background = Color(0xFFF3F6FB),
+    onBackground = Color(0xFF141B26),
+    surface = Color(0xFFF3F6FB),
+    onSurface = Color(0xFF141B26),
+    onSurfaceVariant = Color(0xFF58657A),
+    outline = Color(0xFFB5C0D2),
+    outlineVariant = Color(0xFFDEE5F0),
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF0F4FC),
-    surfaceContainer = Color(0xFFE9EFF9),
-    surfaceContainerHigh = Color(0xFFE2E8F4),
-    surfaceContainerHighest = Color(0xFFDCE2EE),
+    surfaceContainerLow = Color(0xFFECF0F8),
+    surfaceContainer = Color(0xFFE5ECF6),
+    surfaceContainerHigh = Color(0xFFDCE4F0),
+    surfaceContainerHighest = Color(0xFFD3DCEB),
 )
 
-// M3 Expressive Typography: bold anchor headings + crisp hierarchy
 val ExpressiveTypography = Typography(
-    displaySmall = TextStyle(
-        fontWeight = FontWeight.ExtraBold,
-        fontSize = 32.sp,
-        lineHeight = 38.sp,
-        letterSpacing = (-0.5).sp,
+    headlineLarge = TextStyle(
+        fontWeight = FontWeight.Bold,
+        fontSize = 30.sp,
+        lineHeight = 36.sp,
+        letterSpacing = (-0.4).sp,
     ),
     headlineMedium = TextStyle(
         fontWeight = FontWeight.Bold,
-        fontSize = 26.sp,
-        lineHeight = 32.sp,
-        letterSpacing = (-0.3).sp,
+        fontSize = 24.sp,
+        lineHeight = 30.sp,
+        letterSpacing = (-0.25).sp,
     ),
     headlineSmall = TextStyle(
         fontWeight = FontWeight.Bold,
-        fontSize = 22.sp,
-        lineHeight = 28.sp,
-        letterSpacing = (-0.2).sp,
+        fontSize = 20.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.15).sp,
     ),
     titleLarge = TextStyle(
         fontWeight = FontWeight.Bold,
-        fontSize = 19.sp,
-        lineHeight = 25.sp,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
     ),
     titleMedium = TextStyle(
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
+        fontSize = 15.5.sp,
+        lineHeight = 21.sp,
     ),
     titleSmall = TextStyle(
         fontWeight = FontWeight.SemiBold,
         fontSize = 14.sp,
-        lineHeight = 20.sp,
+        lineHeight = 19.sp,
     ),
     bodyMedium = TextStyle(
         fontWeight = FontWeight.Normal,
@@ -106,12 +124,12 @@ val ExpressiveTypography = Typography(
     bodySmall = TextStyle(
         fontWeight = FontWeight.Normal,
         fontSize = 12.5.sp,
-        lineHeight = 18.sp,
+        lineHeight = 17.sp,
     ),
     labelLarge = TextStyle(
         fontWeight = FontWeight.SemiBold,
         fontSize = 14.sp,
-        lineHeight = 20.sp,
+        lineHeight = 19.sp,
     ),
     labelMedium = TextStyle(
         fontWeight = FontWeight.SemiBold,
@@ -125,25 +143,25 @@ val ExpressiveTypography = Typography(
     ),
 )
 
-// M3 Expressive generous organic shapes
 val ExpressiveShapes = Shapes(
-    extraSmall = RoundedCornerShape(10.dp),
+    extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(14.dp),
     medium = RoundedCornerShape(20.dp),
-    large = RoundedCornerShape(26.dp),
-    extraLarge = RoundedCornerShape(32.dp),
+    large = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(28.dp),
 )
 
 @Composable
 fun AVBForgeTheme(
+    useDynamicColor: Boolean = false,
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val scheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val scheme = if (useDynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else {
-        if (darkTheme) ExpressiveDark else ExpressiveLight
+        if (darkTheme) OceanDarkScheme else OceanLightScheme
     }
     MaterialTheme(
         colorScheme = scheme,
