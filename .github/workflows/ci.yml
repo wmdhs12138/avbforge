@@ -82,12 +82,12 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Run Android unit tests, lint, and build Debug APK
+      - name: Run Android unit tests, lint, and build Release APK (R8 shrunk)
         working-directory: android-app
-        run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+        run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleRelease
 
-      - name: Upload Debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: AVBForge-debug-arm64-v8a
-          path: android-app/app/build/outputs/apk/debug/*.apk
+          name: AVBForge-arm64-v8a
+          path: android-app/app/build/outputs/apk/release/*.apk

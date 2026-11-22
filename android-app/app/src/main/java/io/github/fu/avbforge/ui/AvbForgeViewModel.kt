@@ -32,6 +32,7 @@ data class UiState(
     val snapshot: DeviceSnapshot? = null,
     val keys: List<KeyEntry> = emptyList(),
     val lastBackup: BackupManifest? = null,
+    val lastBackupDir: String? = null,
     val exportedInitBootPath: String? = null,
     val lastForgeReport: ForgeBundleReport? = null,
     val lastGsiReport: GsiSignReport? = null,
@@ -66,6 +67,10 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearError() {
         _state.update { it.copy(errorBanner = null) }
+    }
+
+    fun clearLogs() {
+        _state.update { it.copy(logs = emptyList()) }
     }
 
     fun refreshDevice() {
@@ -116,6 +121,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         busy = false,
                         progress = null,
                         lastBackup = manifest,
+                        lastBackupDir = outDir.absolutePath,
                         statusMessage = "备份完成：${manifest.partitions.size} 个分区已保存到 ${outDir.absolutePath}",
                     )
                 }
