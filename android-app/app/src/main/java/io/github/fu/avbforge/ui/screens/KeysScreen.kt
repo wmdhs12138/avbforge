@@ -64,7 +64,9 @@ import androidx.compose.ui.unit.dp
 import io.github.fu.avbforge.core.UriPathResolver
 import io.github.fu.avbforge.data.KeyEntry
 import io.github.fu.avbforge.ui.AvbForgeViewModel
+import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
+import io.github.fu.avbforge.ui.components.M3EHelpButton
 import io.github.fu.avbforge.ui.components.M3EPillChip
 import io.github.fu.avbforge.ui.components.M3EPrimaryButton
 import io.github.fu.avbforge.ui.components.M3ESectionLabel
@@ -121,7 +123,7 @@ fun KeysScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                M3ESectionLabel("已托管密钥（${state.keys.size}）")
+                M3ESectionLabel("已托管密钥（${state.keys.size}）", helpDoc = HelpDocs.PKMD_EXPORT)
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     state.keys.forEachIndexed { idx, key ->
                         val matchesDevice = state.snapshot?.vbmetaPubkeySha1.equals(key.sha1, ignoreCase = true)
@@ -309,7 +311,10 @@ private fun AddKeyBottomSheet(
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("添加 AVB 签名密钥", style = MaterialTheme.typography.titleLarge)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("添加 AVB 签名密钥", style = MaterialTheme.typography.titleLarge)
+                M3EHelpButton(doc = HelpDocs.KEY_BITS)
+            }
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 listOf("生成新密钥", "导入 PEM").forEachIndexed { idx, label ->
                     SegmentedButton(

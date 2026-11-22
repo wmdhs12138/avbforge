@@ -51,8 +51,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.github.fu.avbforge.core.UriPathResolver
 import io.github.fu.avbforge.ui.AvbForgeViewModel
+import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
 import io.github.fu.avbforge.ui.components.M3EGroupRow
+import io.github.fu.avbforge.ui.components.M3EHelpButton
 import io.github.fu.avbforge.ui.components.M3EHeroCard
 import io.github.fu.avbforge.ui.components.M3EPillChip
 import io.github.fu.avbforge.ui.components.M3EPrimaryButton
@@ -131,7 +133,7 @@ fun DsuScreen(
         }
 
         // Step 1: Pick & Sign GSI (Clean Group Row!)
-        M3ESectionLabel("体验第三方 GSI")
+        M3ESectionLabel("体验第三方 GSI", helpDoc = HelpDocs.GSI_SIGN)
         M3EGroupRow(
             title = if (gsiInputPath.isBlank()) "选择 arm64-ab GSI 镜像" else File(gsiInputPath).name,
             subtitle = gsiInputPath.ifBlank { "支持 .img / .img.xz / .img.gz 与 Android Sparse" },
@@ -192,9 +194,10 @@ fun DsuScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                         Icon(Icons.Rounded.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                                         Text("独立 Userdata 大小", style = MaterialTheme.typography.titleMedium)
+                                        M3EHelpButton(doc = HelpDocs.DSU_USERDATA)
                                     }
                                     M3EPillChip(
                                         text = "$gib GiB",
@@ -225,6 +228,7 @@ fun DsuScreen(
                             subtitle = "如 GSI 启动异常，强制重启一次自动回退 OriginOS",
                             icon = Icons.Rounded.Shield,
                             shape = m3eGroupShape(2, 3),
+                            helpDoc = HelpDocs.DSU_SINGLE_BOOT,
                             trailing = {
                                 Switch(checked = singleBoot, onCheckedChange = { singleBoot = it })
                             },

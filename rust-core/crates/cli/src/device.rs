@@ -22,6 +22,13 @@ pub const STANDARD_BOOT_PARTITIONS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PartitionSizeInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    pub in_vbmeta_chain: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeviceSnapshot {
     pub model: String,
     pub device: String,
@@ -43,6 +50,7 @@ pub struct DeviceSnapshot {
     pub dsu_status: String,
     pub freezer_enabled: bool,
     pub app_in_doze_whitelist: bool,
+    pub partition_sizes: Vec<PartitionSizeInfo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -198,6 +206,23 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(pkg))
         .unwrap_or(false);
 
+    // Collect live sizes for standard AVB/boot partitions on active slot
+    let mut partition_sizes = Vec::new();
+    for &part in STANDARD_BOOT_PARTITIONS {
+        let dev = PathBuf::from(format!("/dev/block/by-name/{part}{active_slot}"));
+        if dev.exists() {
+            if let Ok(sz) = blockdev_size(&dev) {
+                let in_chain = part == "vbmeta"
+                    || vbmeta_chained_partitions.iter().any(|p| p == part);
+                partition_sizes.push(PartitionSizeInfo {
+                    name: part.to_string(),
+                    size_bytes: sz,
+                    in_vbmeta_chain: in_chain,
+                });
+            }
+        }
+    }
+
     Ok(DeviceSnapshot {
         model,
         device,
@@ -219,6 +244,7 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
         dsu_status,
         freezer_enabled,
         app_in_doze_whitelist,
+        partition_sizes,
     })
 }
 

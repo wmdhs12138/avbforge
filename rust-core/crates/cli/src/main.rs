@@ -44,7 +44,7 @@ enum Commands {
         out_dir: PathBuf,
         #[arg(long)]
         slot: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_delimiter = ',')]
         partitions: Vec<String>,
     },
     /// Export current slot init_boot.img for patching with any user-chosen KernelSU manager

@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import io.github.fu.avbforge.core.RiskLevel
 import io.github.fu.avbforge.core.UriPathResolver
 import io.github.fu.avbforge.ui.AvbForgeViewModel
+import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
 import io.github.fu.avbforge.ui.components.M3EGroupRow
 import io.github.fu.avbforge.ui.components.M3EHeroCard
@@ -112,7 +113,7 @@ fun ForgeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         // Section 1: Stock Image Source
-        M3ESectionLabel("1 · 原厂镜像来源")
+        M3ESectionLabel("1 · 原厂镜像来源", helpDoc = HelpDocs.FORGE_STOCK_DIR)
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             M3EGroupRow(
                 title = if (stockDir.isBlank()) "选择原厂散包 / 备份目录" else File(stockDir).name,
@@ -141,7 +142,7 @@ fun ForgeScreen(
         }
 
         // Section 2: KernelSU Collaboration
-        M3ESectionLabel("2 · KernelSU Root 协作")
+        M3ESectionLabel("2 · KernelSU Root 协作", helpDoc = HelpDocs.KSU_COLLAB)
         val ksuRowCount = if (includeKsuRoot) 3 else 1
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             M3EGroupRow(
@@ -149,6 +150,7 @@ fun ForgeScreen(
                 subtitle = if (includeKsuRoot) "推荐开启，防重启后丢 Root" else "关闭将刷入无 Root 纯净自签镜像",
                 icon = Icons.Rounded.Memory,
                 shape = m3eGroupShape(0, ksuRowCount),
+                helpDoc = HelpDocs.KSU_COLLAB,
                 trailing = {
                     Switch(checked = includeKsuRoot, onCheckedChange = { includeKsuRoot = it })
                 },
@@ -177,7 +179,7 @@ fun ForgeScreen(
         }
 
         // Section 3: DSU Public Key Injection
-        M3ESectionLabel("3 · DSU 公钥注入")
+        M3ESectionLabel("3 · DSU 公钥注入", helpDoc = HelpDocs.DSU_PUBKEY)
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             M3EGroupRow(
                 title = "向 init_boot 注入 DSU 公钥",
@@ -186,6 +188,7 @@ fun ForgeScreen(
                 iconTint = MaterialTheme.colorScheme.tertiary,
                 iconBg = MaterialTheme.colorScheme.tertiaryContainer,
                 shape = m3eGroupShape(0, 1),
+                helpDoc = HelpDocs.DSU_PUBKEY,
                 trailing = {
                     Switch(checked = injectDsuKey, onCheckedChange = { injectDsuKey = it })
                 },

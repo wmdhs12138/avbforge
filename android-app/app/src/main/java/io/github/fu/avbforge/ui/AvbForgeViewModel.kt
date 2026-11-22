@@ -104,12 +104,21 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun backupActiveSlot() {
+    fun backupPartitions(slot: String? = null, partitions: List<String> = emptyList()) {
         viewModelScope.launch {
-            val outDir = File(baseWorkDir, "backup_${System.currentTimeMillis() / 1000}")
-            _state.update { it.copy(busy = true, statusMessage = "正在备份当前槽位全部引导分区...", errorBanner = null) }
+            val slotTag = slot?.trimStart('_')?.ifBlank { null } ?: _state.value.snapshot?.activeSlot?.trimStart('_') ?: "cur"
+            val outDir = File(baseWorkDir, "backup_${slotTag}_${System.currentTimeMillis() / 1000}")
+            val desc = if (partitions.isEmpty()) "全套 AVB 链分区" else "${partitions.size} 个选中分区"
+            _state.update { it.copy(busy = true, statusMessage = "正在备份槽位 _$slotTag 的$desc...", errorBanner = null) }
+            val args = mutableListOf("backup-partitions", "--out-dir", outDir.absolutePath)
+            if (!slot.isNullOrBlank()) {
+                args += listOf("--slot", slot)
+            }
+            if (partitions.isNotEmpty()) {
+                args += listOf("--partitions", partitions.joinToString(","))
+            }
             val res = runner.run(
-                args = listOf("backup-partitions", "--out-dir", outDir.absolutePath),
+                args = args,
                 requireRoot = true,
                 onLog = ::appendLog,
                 onProgress = { p -> _state.update { it.copy(progress = p) } },

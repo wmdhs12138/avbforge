@@ -4,6 +4,13 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
+data class PartitionSizeInfo(
+    val name: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    @SerialName("in_vbmeta_chain") val inVbmetaChain: Boolean = true,
+)
+
+@Serializable
 data class DeviceSnapshot(
     val model: String = "",
     val device: String = "",
@@ -25,6 +32,7 @@ data class DeviceSnapshot(
     @SerialName("dsu_status") val dsuStatus: String = "unknown",
     @SerialName("freezer_enabled") val freezerEnabled: Boolean = false,
     @SerialName("app_in_doze_whitelist") val appInDozeWhitelist: Boolean = false,
+    @SerialName("partition_sizes") val partitionSizes: List<PartitionSizeInfo> = emptyList(),
 )
 
 @Serializable
