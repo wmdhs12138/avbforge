@@ -121,4 +121,24 @@ object HelpDocs {
             "关闭后每次重启都会默认继续进入 GSI，直到手动禁用或清理。",
         ),
     )
+
+    val AVB_CHAIN_FSTAB = HelpDoc(
+        title = "AVB 链式分区与 fstab 详情",
+        summary = "只读展示本机底层的两项关键校验配置，不会修改任何分区。",
+        bullets = listOf(
+            "vbmeta 链式分区：Bootloader 验证完 vbmeta 后继续链式验签的 6 个分区，首次换密钥自签名时这 6 个分区 + vbmeta 必须全部重签。",
+            "fstab avb_keys：系统 /vendor/etc/fstab.qcom 写死的 DSU 公钥文件名白名单，注入到 init_boot 的自定义公钥必须命中其中一个文件名。",
+        ),
+    )
+
+    val DSU_FIRST_SETUP = HelpDoc(
+        title = "首次启用自签名 DSU 支持",
+        summary = "仅修改当前槽位的 init_boot（8 MB），无需重签其他分区，也不会清除用户数据。",
+        bullets = listOf(
+            "自动先完整备份当前 init_boot 到 Download/AVBForge 作为退路。",
+            "在保留你现有 KernelSU 补丁的前提下，把你的 avb_pkmd.bin 注入 ramdisk 并用同一把密钥重签。",
+            "写回 init_boot 并重启生效一次后，以后就能无限次切换各种自签名 GSI 体验。",
+        ),
+        caution = "前提：设备必须已经处于 Yellow 自签名状态，且密钥库里的默认私钥与本机 vbmeta 公钥一致。",
+    )
 }

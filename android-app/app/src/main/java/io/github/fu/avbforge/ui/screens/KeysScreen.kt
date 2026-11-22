@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,26 +19,25 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AddModerator
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Star
-import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -56,7 +54,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -66,6 +66,7 @@ import io.github.fu.avbforge.data.KeyEntry
 import io.github.fu.avbforge.ui.AvbForgeViewModel
 import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
+import io.github.fu.avbforge.ui.components.M3EGroupRow
 import io.github.fu.avbforge.ui.components.M3EHelpButton
 import io.github.fu.avbforge.ui.components.M3EPillChip
 import io.github.fu.avbforge.ui.components.M3EPrimaryButton
@@ -73,6 +74,10 @@ import io.github.fu.avbforge.ui.components.M3ESectionLabel
 import io.github.fu.avbforge.ui.components.m3eGroupShape
 import java.io.File
 
+/**
+ * Minimal Key Vault:
+ * Clean grouped list of keys (tap any key to open Action BottomSheet) + Extended FAB to Generate/Import.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun KeysScreen(
@@ -81,12 +86,13 @@ fun KeysScreen(
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     var showAddSheet by remember { mutableStateOf(false) }
+    var activeKeyForSheet by remember { mutableStateOf<KeyEntry?>(null) }
     var pendingDelete by remember { mutableStateOf<KeyEntry?>(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (state.keys.isEmpty()) {
-            // Clean Expressive Empty State (Zero Form Wall!)
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -123,98 +129,31 @@ fun KeysScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                M3ESectionLabel("已托管密钥（${state.keys.size}）", helpDoc = HelpDocs.PKMD_EXPORT)
+                M3ESectionLabel("已托管密钥（${state.keys.size}）· 点击管理", helpDoc = HelpDocs.PKMD_EXPORT)
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     state.keys.forEachIndexed { idx, key ->
                         val matchesDevice = state.snapshot?.vbmetaPubkeySha1.equals(key.sha1, ignoreCase = true)
-                        Surface(
-                            shape = m3eGroupShape(idx, state.keys.size),
-                            color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = if (key.isDefault) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                                        modifier = Modifier.size(42.dp),
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(
-                                                Icons.Rounded.Key,
-                                                contentDescription = null,
-                                                tint = if (key.isDefault) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                    }
-                                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Text("${key.alias} · RSA-${key.bits}", style = MaterialTheme.typography.titleMedium)
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            if (key.isDefault) {
-                                                M3EPillChip(
-                                                    text = "默认",
-                                                    icon = Icons.Rounded.Star,
-                                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                )
-                                            }
-                                            if (matchesDevice) {
-                                                M3EPillChip(
-                                                    text = "匹配本机 vbmeta",
-                                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                                )
-                                            }
-                                        }
-                                    }
-                                    IconButton(onClick = { pendingDelete = key }) {
-                                        Icon(
-                                            Icons.Rounded.DeleteOutline,
-                                            contentDescription = "删除",
-                                            tint = MaterialTheme.colorScheme.error,
-                                        )
-                                    }
-                                }
-
-                                M3EPillChip(
-                                    text = "SHA-1: ${key.sha1}",
-                                    copyValue = key.sha1,
-                                    onCopied = { onNotify("已复制公钥 SHA-1") },
-                                )
-
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FilledTonalButton(
-                                        onClick = {
-                                            vm.exportPkmdToDownloads(key)
-                                            onNotify("已导出 avb_pkmd.bin 到 Download/AVBForge")
-                                        },
-                                        shape = CircleShape,
-                                    ) {
-                                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("导出 pkmd")
-                                    }
-                                    if (!key.isDefault) {
-                                        OutlinedButton(onClick = { vm.setDefaultKey(key.id) }, shape = CircleShape) {
-                                            Text("设为默认")
-                                        }
-                                    }
-                                }
-                            }
+                        val tag = buildString {
+                            append("RSA-${key.bits}")
+                            if (key.isDefault) append(" · 默认")
+                            if (matchesDevice) append(" · 匹配本机")
                         }
+                        M3EGroupRow(
+                            title = key.alias,
+                            subtitle = "$tag · ${key.sha1.take(16)}...",
+                            icon = Icons.Rounded.Key,
+                            iconTint = if (key.isDefault) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            iconBg = if (key.isDefault) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                            shape = m3eGroupShape(idx, state.keys.size),
+                            showChevron = true,
+                            onClick = { activeKeyForSheet = key },
+                        )
                     }
                 }
                 Spacer(Modifier.height(150.dp))
             }
         }
 
-        // Clean Extended FAB hovering above floating nav bar
         ExtendedFloatingActionButton(
             onClick = { showAddSheet = true },
             icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
@@ -226,6 +165,101 @@ fun KeysScreen(
                 .align(Alignment.BottomEnd)
                 .padding(end = 20.dp, bottom = 92.dp),
         )
+    }
+
+    activeKeyForSheet?.let { key ->
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val matchesDevice = state.snapshot?.vbmetaPubkeySha1.equals(key.sha1, ignoreCase = true)
+        ModalBottomSheet(
+            onDismissRequest = { activeKeyForSheet = null },
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${key.alias} · RSA-${key.bits}", style = MaterialTheme.typography.titleLarge)
+                    if (key.isDefault) {
+                        M3EPillChip(
+                            text = "默认",
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    if (matchesDevice) {
+                        M3EPillChip(
+                            text = "匹配本机",
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                }
+                Text(
+                    text = "SHA-1: ${key.sha1}",
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                val actionCount = if (key.isDefault) 3 else 4
+                var idx = 0
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    M3EGroupRow(
+                        title = "复制完整公钥 SHA-1",
+                        icon = Icons.Rounded.ContentCopy,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        shape = m3eGroupShape(idx++, actionCount),
+                        onClick = {
+                            clipboard.setText(AnnotatedString(key.sha1))
+                            activeKeyForSheet = null
+                            onNotify("已复制公钥 SHA-1")
+                        },
+                    )
+                    M3EGroupRow(
+                        title = "导出 avb_pkmd.bin 公钥",
+                        subtitle = "保存到 Download/AVBForge",
+                        icon = Icons.Rounded.Download,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        shape = m3eGroupShape(idx++, actionCount),
+                        onClick = {
+                            vm.exportPkmdToDownloads(key)
+                            activeKeyForSheet = null
+                            onNotify("已导出 avb_pkmd.bin")
+                        },
+                    )
+                    if (!key.isDefault) {
+                        M3EGroupRow(
+                            title = "设为默认签名密钥",
+                            icon = Icons.Rounded.Star,
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                            shape = m3eGroupShape(idx++, actionCount),
+                            onClick = {
+                                vm.setDefaultKey(key.id)
+                                activeKeyForSheet = null
+                                onNotify("已设「${key.alias}」为默认密钥")
+                            },
+                        )
+                    }
+                    M3EGroupRow(
+                        title = "删除此密钥",
+                        icon = Icons.Rounded.DeleteOutline,
+                        iconTint = MaterialTheme.colorScheme.error,
+                        iconBg = MaterialTheme.colorScheme.errorContainer,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        shape = m3eGroupShape(idx, actionCount),
+                        onClick = {
+                            activeKeyForSheet = null
+                            pendingDelete = key
+                        },
+                    )
+                }
+            }
+        }
     }
 
     if (showAddSheet) {
@@ -277,7 +311,7 @@ private fun AddKeyBottomSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var mode by remember { mutableIntStateOf(0) } // 0 = Generate, 1 = Import
+    var mode by remember { mutableIntStateOf(0) }
     var genAlias by remember { mutableStateOf("neo9-avb") }
     var bitIdx by remember { mutableIntStateOf(0) }
     val bits = listOf(2048, 4096)

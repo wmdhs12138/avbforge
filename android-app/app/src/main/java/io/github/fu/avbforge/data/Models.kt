@@ -66,6 +66,16 @@ data class BackupManifest(
 )
 
 @Serializable
+data class PatchDsuKeyReport(
+    @SerialName("output_path") val outputPath: String,
+    val size: Long,
+    val sha256: String,
+    @SerialName("injected_paths") val injectedPaths: List<String> = emptyList(),
+    @SerialName("has_kernelsu") val hasKernelsu: Boolean = false,
+    @SerialName("avb_pubkey_sha1") val avbPubkeySha1: String = "",
+)
+
+@Serializable
 data class ForgeBundleReport(
     @SerialName("output_dir") val outputDir: String,
     @SerialName("signed_partitions") val signedPartitions: List<String>,

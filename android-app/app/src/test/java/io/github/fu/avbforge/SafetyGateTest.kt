@@ -50,6 +50,7 @@ class SafetyGateTest {
         )
         assertEquals(RiskLevel.CAUTION, res.riskLevel)
         assertTrue(res.requireFullBundle)
+        assertTrue(res.requiredChecklist.any { it.contains("格式化数据分区") })
         assertTrue(res.requiredChecklist.any { it.contains("KernelSU") })
         assertTrue(res.requiredChecklist.any { it.contains("黄金备份") })
     }

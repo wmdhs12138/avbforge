@@ -9,6 +9,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,10 +22,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.StopCircle
@@ -31,7 +36,6 @@ import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -63,6 +67,13 @@ import io.github.fu.avbforge.ui.components.m3eGroupShape
 import java.io.File
 import kotlin.math.roundToInt
 
+/**
+ * Dedicated First-Time DSU Setup + GSI Signing & Management Page:
+ * Section 1: First-Time DSU Enablement (1-click inject pubkey into active init_boot, auto-collapsed once ready!)
+ * Section 2: Sign & Install New GSI via native gsi_tool
+ * Section 3: Manage Current DSU (status / disable / wipe)
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DsuScreen(
     state: UiState,
@@ -70,6 +81,13 @@ fun DsuScreen(
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val snap = state.snapshot
+    val dsuReady = snap?.initBootAvbpubkeys?.isNotEmpty() == true
+    val fstabNames = snap?.fstabAvbKeys?.map { it.substringAfterLast('/') }.orEmpty()
+    var targetKeyName by remember { mutableStateOf(fstabNames.firstOrNull() ?: "q-gsi.avbpubkey") }
+    var expandReinject by remember { mutableStateOf(false) }
+    var confirmFlashDsuInit by remember { mutableStateOf(false) }
+
     var gsiInputPath by remember { mutableStateOf("") }
     var userdataSlider by remember { mutableFloatStateOf(16f) }
     var singleBoot by remember { mutableStateOf(true) }
@@ -90,50 +108,78 @@ fun DsuScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // DSU Status Hero Card with Inline Controls
-        M3EHeroCard(
-            title = "DSU 状态：${state.dsuStatusText}",
-            subtitle = "无损隔离运行第三方 GSI，不影响原厂系统与用户数据",
-            icon = Icons.Rounded.SystemUpdate,
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                FilledTonalButton(
-                    onClick = { vm.runDsuSimple("status") },
-                    enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("刷新")
+        // Section 1: First-Time DSU Enablement (inject avbpubkey into current init_boot)
+        M3ESectionLabel("1 · 首次使用 DSU 适配", helpDoc = HelpDocs.DSU_FIRST_SETUP)
+
+        if (dsuReady && !expandReinject) {
+            M3EGroupRow(
+                title = "本机已支持自签名 DSU",
+                subtitle = "init_boot 已包含 ${snap?.initBootAvbpubkeys?.firstOrNull()?.substringAfterLast('/') ?: "avbpubkey"} · 可直接往下签名并安装 GSI",
+                icon = Icons.Rounded.CheckCircle,
+                iconTint = MaterialTheme.colorScheme.secondary,
+                iconBg = MaterialTheme.colorScheme.secondaryContainer,
+                trailingText = "重新注入",
+                onClick = { expandReinject = true },
+            )
+        } else {
+            M3EHeroCard(
+                title = if (dsuReady) "重新注入 DSU 公钥" else "首次启用自签名 DSU",
+                subtitle = "仅备份并修改当前槽位 init_boot（8 MB），保留现有 KSU 补丁，不会清除用户数据",
+                icon = Icons.Rounded.Key,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ) {
+                if (fstabNames.isNotEmpty()) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        fstabNames.forEach { kname ->
+                            M3EPillChip(
+                                text = kname,
+                                containerColor = if (targetKeyName == kname) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.7f)
+                                },
+                                contentColor = if (targetKeyName == kname) {
+                                    MaterialTheme.colorScheme.onPrimary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                onClick = { targetKeyName = kname },
+                            )
+                        }
+                    }
                 }
-                FilledTonalButton(
-                    onClick = { vm.runDsuSimple("disable") },
+                M3EPrimaryButton(
+                    text = "备份并生成适配 DSU 的 init_boot",
+                    icon = Icons.Rounded.AutoFixHigh,
+                    onClick = { vm.prepareDsuInitBoot(targetKeyName) },
                     enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.StopCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("禁用")
-                }
-                FilledTonalButton(
-                    onClick = { confirmWipe = true },
-                    enabled = !state.busy,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("清理")
-                }
+                    loading = state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
 
-        // Step 1: Pick & Sign GSI (Clean Group Row!)
-        M3ESectionLabel("体验第三方 GSI", helpDoc = HelpDocs.GSI_SIGN)
+        AnimatedVisibility(
+            visible = state.lastDsuPatchReport != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            state.lastDsuPatchReport?.let { rep ->
+                M3EGroupRow(
+                    title = "DSU init_boot 已验签就绪",
+                    subtitle = "KSU保留=${rep.hasKernelsu} · 点击写入当前槽位 init_boot（不清空数据）",
+                    icon = Icons.Rounded.FlashOn,
+                    iconTint = MaterialTheme.colorScheme.secondary,
+                    iconBg = MaterialTheme.colorScheme.secondaryContainer,
+                    trailingText = "写入",
+                    onClick = { confirmFlashDsuInit = true },
+                )
+            }
+        }
+
+        // Section 2: Sign & Install New GSI
+        M3ESectionLabel("2 · 签名并安装新 GSI", helpDoc = HelpDocs.GSI_SIGN)
         M3EGroupRow(
             title = if (gsiInputPath.isBlank()) "选择 arm64-ab GSI 镜像" else File(gsiInputPath).name,
             subtitle = gsiInputPath.ifBlank { "支持 .img / .img.xz / .img.gz 与 Android Sparse" },
@@ -159,7 +205,6 @@ fun DsuScreen(
             )
         }
 
-        // Step 2: Signed GSI Ready -> Configure & Install
         AnimatedVisibility(
             visible = state.lastGsiReport != null,
             enter = fadeIn() + expandVertically(),
@@ -168,10 +213,9 @@ fun DsuScreen(
             state.lastGsiReport?.let { rep ->
                 val gib = userdataSlider.roundToInt()
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    M3ESectionLabel("安装已签名 GSI")
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         M3EGroupRow(
-                            title = "AVB 签名与 Hashtree 校验通过",
+                            title = "GSI 签名与 Hashtree 校验通过",
                             subtitle = "Root: ${rep.rootDigest.take(24)}...",
                             icon = Icons.Rounded.CheckCircle,
                             iconTint = MaterialTheme.colorScheme.secondary,
@@ -252,7 +296,61 @@ fun DsuScreen(
             }
         }
 
+        // Section 3: Manage Current DSU
+        M3ESectionLabel("3 · 管理本机 DSU（当前：${state.dsuStatusText}）")
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            M3EGroupRow(
+                title = "刷新 DSU 状态",
+                subtitle = "查询 /system/bin/gsi_tool status",
+                icon = Icons.Rounded.Refresh,
+                shape = m3eGroupShape(0, 3),
+                showChevron = true,
+                onClick = { if (!state.busy) vm.runDsuSimple("status") },
+            )
+            M3EGroupRow(
+                title = "禁用已安装的 DSU",
+                subtitle = "保留镜像文件但下次重启不再进入 GSI",
+                icon = Icons.Rounded.StopCircle,
+                shape = m3eGroupShape(1, 3),
+                showChevron = true,
+                onClick = { if (!state.busy) vm.runDsuSimple("disable") },
+            )
+            M3EGroupRow(
+                title = "彻底清理 DSU 与空间",
+                subtitle = "删除 /data/gsi/dsu 下所有 GSI 与虚拟 userdata，不影响原系统",
+                icon = Icons.Rounded.DeleteForever,
+                iconTint = MaterialTheme.colorScheme.error,
+                iconBg = MaterialTheme.colorScheme.errorContainer,
+                shape = m3eGroupShape(2, 3),
+                showChevron = true,
+                onClick = { if (!state.busy) confirmWipe = true },
+            )
+        }
+
         Spacer(Modifier.height(96.dp))
+    }
+
+    if (confirmFlashDsuInit && state.lastDsuPatchReport != null) {
+        AlertDialog(
+            onDismissRequest = { confirmFlashDsuInit = false },
+            shape = RoundedCornerShape(28.dp),
+            title = { Text("写入适配 DSU 的 init_boot？") },
+            text = {
+                Text("仅写入当前活动槽位 init_boot（8 MB），保留 KernelSU，不清除用户数据。写入后会自动清缓存回读验签，完成后重启一次手机即可生效。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmFlashDsuInit = false
+                        vm.flashPreparedDsuInitBoot(state.lastDsuPatchReport.outputPath)
+                    },
+                    shape = CircleShape,
+                ) { Text("确认写入并校验") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmFlashDsuInit = false }) { Text("取消") }
+            },
+        )
     }
 
     if (confirmWipe) {

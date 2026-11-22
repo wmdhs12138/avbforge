@@ -28,13 +28,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -117,7 +118,6 @@ fun AvbForgeApp(
         }
     }
 
-    // Show non-busy completion messages cleanly as snackbars instead of an ugly permanent gray bar
     var lastNotifiedStatus by remember { mutableStateOf(state.statusMessage) }
     LaunchedEffect(state.statusMessage, state.busy) {
         if (!state.busy && state.statusMessage != lastNotifiedStatus && state.statusMessage != "就绪") {
@@ -128,10 +128,10 @@ fun AvbForgeApp(
 
     val navItems = remember {
         listOf(
-            NavTabItem("体检", "AVBForge", Icons.Rounded.Shield),
+            NavTabItem("主页", "AVBForge", Icons.Rounded.Home),
+            NavTabItem("自签名", "自签名引导", Icons.Rounded.VerifiedUser),
+            NavTabItem("DSU", "DSU 体验", Icons.Rounded.SystemUpdate),
             NavTabItem("密钥", "密钥库", Icons.Rounded.Key),
-            NavTabItem("工坊", "镜像工坊", Icons.Rounded.Build),
-            NavTabItem("DSU", "DSU 工作室", Icons.Rounded.SystemUpdate),
         )
     }
 
@@ -158,6 +158,9 @@ fun AvbForgeApp(
                 ),
                 scrollBehavior = scrollBehavior,
                 actions = {
+                    IconButton(onClick = { if (!state.busy) vm.refreshDevice() }, enabled = !state.busy) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = "刷新状态")
+                    }
                     IconButton(onClick = {
                         onToggleDynamicColor()
                         notify(if (!useDynamicColor) "已切换为系统莫奈动态取色" else "已切换为内置 M3E 蓝绿主题")
@@ -189,7 +192,6 @@ fun AvbForgeApp(
                 .padding(top = padding.calculateTopPadding())
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Sleek floating progress pill — ONLY visible when an operation is running
                 AnimatedVisibility(
                     visible = state.busy,
                     enter = fadeIn() + expandVertically(),
@@ -197,7 +199,7 @@ fun AvbForgeApp(
                 ) {
                     Surface(
                         shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 4.dp),
@@ -235,7 +237,6 @@ fun AvbForgeApp(
                     }
                 }
 
-                // Dismissible Error Banner — ONLY visible when an error occurs
                 AnimatedVisibility(
                     visible = state.errorBanner != null,
                     enter = fadeIn() + expandVertically(),
@@ -271,7 +272,6 @@ fun AvbForgeApp(
                     }
                 }
 
-                // Smooth horizontal screen switch
                 AnimatedContent(
                     targetState = tab,
                     modifier = Modifier.weight(1f),
@@ -286,14 +286,13 @@ fun AvbForgeApp(
                 ) { currentTab ->
                     when (currentTab) {
                         0 -> DashboardScreen(state, vm, notify)
-                        1 -> KeysScreen(state, vm, notify)
-                        2 -> ForgeScreen(state, vm, notify)
-                        3 -> DsuScreen(state, vm, notify)
+                        1 -> ForgeScreen(state, vm, notify)
+                        2 -> DsuScreen(state, vm, notify)
+                        3 -> KeysScreen(state, vm, notify)
                     }
                 }
             }
 
-            // Floating M3E Capsule Nav Bar
             M3EFloatingNavBar(
                 items = navItems,
                 selectedIndex = tab,

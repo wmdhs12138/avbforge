@@ -14,6 +14,7 @@ import io.github.fu.avbforge.data.DeviceSnapshot
 import io.github.fu.avbforge.data.ForgeBundleReport
 import io.github.fu.avbforge.data.GsiSignReport
 import io.github.fu.avbforge.data.KeyEntry
+import io.github.fu.avbforge.data.PatchDsuKeyReport
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +36,7 @@ data class UiState(
     val lastBackupDir: String? = null,
     val exportedInitBootPath: String? = null,
     val lastForgeReport: ForgeBundleReport? = null,
+    val lastDsuPatchReport: PatchDsuKeyReport? = null,
     val lastGsiReport: GsiSignReport? = null,
     val dsuStatusText: String = "unknown",
     val errorBanner: String? = null,
@@ -437,6 +439,99 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 refreshDevice()
             }.onFailure { err ->
                 _state.update { it.copy(busy = false, errorBanner = "DSU $action 失败：${err.message}") }
+            }
+        }
+    }
+
+    /**
+     * One-click first-time DSU preparation:
+     * 1. Backup active slot live init_boot (preserving KSU)
+     * 2. Inject user's avb_pkmd.bin into ramdisk & re-sign with default key + verify
+     */
+    fun prepareDsuInitBoot(targetKeyName: String) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "请先在「密钥」页导入或生成与本机一致的默认 AVB 密钥") }
+            return
+        }
+        viewModelScope.launch {
+            val ts = System.currentTimeMillis() / 1000
+            val bkpFile = File(baseWorkDir, "init_boot_before_dsu_$ts.img")
+            val outFile = File(baseWorkDir, "init_boot_dsu_ready_$ts.img")
+            _state.update { it.copy(busy = true, statusMessage = "正在备份当前 init_boot 并注入 DSU 公钥...", errorBanner = null) }
+
+            val expRes = runner.run(
+                args = listOf("export-init-boot", "--output", bkpFile.absolutePath),
+                requireRoot = true,
+                onLog = ::appendLog,
+            )
+            if (expRes.isFailure) {
+                _state.update { it.copy(busy = false, errorBanner = "备份当前 init_boot 失败：${expRes.exceptionOrNull()?.message}") }
+                return@launch
+            }
+
+            runCatching {
+                vault.withTempPlaintextKey(key.id) { pemFile, _ ->
+                    runner.run(
+                        args = listOf(
+                            "patch-dsu-key",
+                            "--input", bkpFile.absolutePath,
+                            "--output", outFile.absolutePath,
+                            "--key", pemFile.absolutePath,
+                            "--partition-name", "init_boot",
+                            "--target-key-name", targetKeyName.ifBlank { "q-gsi.avbpubkey" },
+                        ),
+                        requireRoot = false,
+                        onLog = ::appendLog,
+                    )
+                }
+            }.onSuccess { res ->
+                res.onSuccess { elem ->
+                    val rep = runner.json.decodeFromJsonElement<PatchDsuKeyReport>(elem)
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            lastDsuPatchReport = rep,
+                            statusMessage = "已生成并验签 DSU init_boot（KSU保留=${rep.hasKernelsu}），确认后可写入当前槽位",
+                        )
+                    }
+                }.onFailure { err ->
+                    _state.update { it.copy(busy = false, errorBanner = "注入 DSU 公钥失败：${err.message}") }
+                }
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "读取密钥失败：${err.message}") }
+            }
+        }
+    }
+
+    fun flashPreparedDsuInitBoot(imagePath: String) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "未找到默认密钥") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, statusMessage = "正在写入 DSU init_boot 并回读校验...", errorBanner = null) }
+            val res = runner.run(
+                args = listOf(
+                    "flash-partition",
+                    "--partition", "init_boot",
+                    "--image", imagePath,
+                    "--expected-pubkey", vault.pkmdFile(key.id).absolutePath,
+                ),
+                requireRoot = true,
+                onLog = ::appendLog,
+                onProgress = { p -> _state.update { it.copy(progress = p) } },
+            )
+            res.onSuccess {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        statusMessage = "DSU init_boot 写入并回读验签通过！重启一次手机后即可使用 DSU。",
+                    )
+                }
+                refreshDevice()
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, progress = null, errorBanner = "写入 init_boot 失败：${err.message}") }
             }
         }
     }
