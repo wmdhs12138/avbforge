@@ -1,0 +1,20 @@
+[package]
+name = "avbforge-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "avbforge-core"
+path = "src/main.rs"
+
+[dependencies]
+avb2 = { path = "../avb2" }
+bootimg = { path = "../bootimg" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

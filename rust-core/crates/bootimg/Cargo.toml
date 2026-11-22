@@ -1,0 +1,15 @@
+[package]
+name = "bootimg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+lz4_flex.workspace = true
+flate2.workspace = true
+lzma-rs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

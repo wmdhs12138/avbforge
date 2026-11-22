@@ -1,0 +1,90 @@
+name: CI — Rust Core + AVB Cross-Verify + Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  rust-test-and-cross-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust workspace unit & integration tests
+        working-directory: rust-core
+        run: cargo test --workspace
+
+      - name: Build host avbforge-core for cross-verification
+        working-directory: rust-core
+        run: cargo build --release --bin avbforge-core
+
+      - name: Download official AOSP avbtool.py
+        run: |
+          curl -fSL "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
+            | base64 -d > /tmp/avbtool.py
+          chmod +x /tmp/avbtool.py
+          python3 /tmp/avbtool.py version
+
+      - name: Run bidirectional avbtool.py cross-verification
+        run: |
+          chmod +x rust-core/tests/cross_verify_avbtool.sh
+          ./rust-core/tests/cross_verify_avbtool.sh \
+            rust-core/target/release/avbforge-core \
+            /tmp/avbtool.py
+
+  build-android-apk:
+    needs: rust-test-and-cross-verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust with aarch64-linux-android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK & NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK 27 & cargo-ndk
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+          cargo install cargo-ndk --locked
+
+      - name: Cross-compile avbforge-core (aarch64-linux-android)
+        working-directory: rust-core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
+        run: |
+          cargo ndk -t arm64-v8a --platform 31 build --release --bin avbforge-core
+          mkdir -p ../android-app/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/avbforge-core \
+             ../android-app/app/src/main/jniLibs/arm64-v8a/libavbforge_core.so
+          chmod 755 ../android-app/app/src/main/jniLibs/arm64-v8a/libavbforge_core.so
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Run Android unit tests, lint, and build Debug APK
+        working-directory: android-app
+        run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVBForge-debug-arm64-v8a
+          path: android-app/app/build/outputs/apk/debug/*.apk

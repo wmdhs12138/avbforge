@@ -1,0 +1,24 @@
+# Rust
+rust-core/target/
+**/*.rs.bk
+
+# Android / Gradle
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/app/src/main/jniLibs/arm64-v8a/libavbforge_core.so
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Keys / Images / Temp
+*.pem
+*.key
+*.bin
+*.img
+*.xz
+*.gz
+.idea/
+.DS_Store
