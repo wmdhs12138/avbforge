@@ -19,12 +19,18 @@ data class SafetyAssessment(
 
 object SafetyGate {
 
+    fun isSupportedNeo9(snapshot: DeviceSnapshot): Boolean {
+        return snapshot.model.equals("V2338A", ignoreCase = true) ||
+            snapshot.device.startsWith("PD2338", ignoreCase = true)
+    }
+
     fun assessFlash(
         snapshot: DeviceSnapshot,
         selectedKeySha1: String?,
         includeKsuRoot: Boolean,
         hasStockBackup: Boolean,
     ): SafetyAssessment {
+        val isNeo9 = isSupportedNeo9(snapshot)
         val isVivoFamily = snapshot.manufacturer.equals("vivo", ignoreCase = true) ||
             snapshot.model.startsWith("V2", ignoreCase = true) ||
             snapshot.device.startsWith("PD", ignoreCase = true)
@@ -104,6 +110,14 @@ object SafetyGate {
 
         if (sdkRisk == RiskLevel.HIGH_RISK) {
             checklist.add(0, "我已知晓 Android ${snapshot.androidRelease} 固件可能不支持 avb_custom_key，并自行承担刷写风险。")
+        }
+
+        if (!isNeo9) {
+            overallRisk = RiskLevel.HIGH_RISK
+            checklist.add(
+                0,
+                "当前机型（${snapshot.manufacturer} ${snapshot.model} / ${snapshot.device}）非 iQOO Neo9 (V2338A/PD2338)，本项目未适配其他机型，我已知晓强行刷写可能导致变砖并自行承担风险。"
+            )
         }
 
         return SafetyAssessment(

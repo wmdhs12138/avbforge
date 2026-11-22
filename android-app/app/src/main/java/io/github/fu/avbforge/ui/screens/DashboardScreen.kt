@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.github.fu.avbforge.core.FreezerDetector
+import io.github.fu.avbforge.core.SafetyGate
 import io.github.fu.avbforge.ui.AvbForgeViewModel
 import io.github.fu.avbforge.ui.UiState
 
@@ -58,6 +59,25 @@ fun DashboardScreen(state: UiState, vm: AvbForgeViewModel) {
                     OutlinedButton(onClick = { vm.backupActiveSlot() }, enabled = !state.busy) {
                         Text("备份全套引导分区")
                     }
+                }
+            }
+        }
+
+        if (snap != null && !SafetyGate.isSupportedNeo9(snap)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "非目标机型警示（仅针对 iQOO Neo9 开发）",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        "检测到当前机型为 ${snap.manufacturer} ${snap.model} (${snap.device})。本应用仅针对 iQOO Neo9 (V2338A/PD2338) Android 14 开发验证，切勿在其他设备上盲目刷写分区！",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
                 }
             }
         }

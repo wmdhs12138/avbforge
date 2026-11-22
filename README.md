@@ -1,5 +1,12 @@
 # AVBForge (`io.github.fu.avbforge`)
 
+> [!CAUTION]
+> **适用范围声明（防误用警示）**：
+> 本项目**仅针对 vivo iQOO Neo9（`V2338A` / `PD2338`）的 Android 14（OriginOS 4）固件**开发与实机验证。
+> - 仅验证了 iQOO Neo9 **Android 14** 的 `avb_custom_key`（回锁 Yellow）自签名与 DSU 链路；
+> - **不适用于** iQOO Neo9 的 Android 15 / Android 16 固件；
+> - **未对任何其他品牌或机型做适配与测试**，切勿在其他设备上直接刷写分区，否则极可能导致无法开机或变砖，一切风险自行承担。
+
 一站式 Android AVB 自签名、KernelSU 协作修补与 DSU/GSI 管理应用（**MIT / Apache-2.0 双协议**）。
 
 ## 核心特性

@@ -73,4 +73,26 @@ class SafetyGateTest {
         assertEquals(RiskLevel.HIGH_RISK, res.riskLevel)
         assertTrue(res.sdkBannerTitle.contains("高风险"))
     }
+
+    @Test
+    fun nonNeo9DeviceTriggersHighRiskWarning() {
+        val snap = DeviceSnapshot(
+            manufacturer = "Xiaomi",
+            model = "23116PN5BC",
+            device = "houji",
+            androidRelease = "14",
+            sdkInt = 34,
+            verifiedBootState = "yellow",
+            deviceState = "locked",
+            vbmetaPubkeySha1 = "abc123",
+        )
+        val res = SafetyGate.assessFlash(
+            snapshot = snap,
+            selectedKeySha1 = "abc123",
+            includeKsuRoot = true,
+            hasStockBackup = true,
+        )
+        assertEquals(RiskLevel.HIGH_RISK, res.riskLevel)
+        assertTrue(res.requiredChecklist.any { it.contains("非 iQOO Neo9") })
+    }
 }
