@@ -104,6 +104,7 @@ data class GsiSignReport(
     @SerialName("tree_size") val treeSize: Long,
     @SerialName("root_digest") val rootDigest: String,
     @SerialName("pubkey_sha1") val pubkeySha1: String,
+    @SerialName("genfs_conflicts_patched") val genfsConflictsPatched: Int = 0,
 )
 
 @Serializable

@@ -99,6 +99,7 @@ fun DsuWizard(
 
     var step by remember { mutableIntStateOf(0) }
     var gsiInputPath by remember { mutableStateOf("") }
+    var fixVendorGenfs by remember { mutableStateOf(true) }
     var userdataSlider by remember { mutableFloatStateOf(16f) }
     var singleBoot by remember { mutableStateOf(true) }
 
@@ -267,7 +268,7 @@ fun DsuWizard(
                             "架构与分区：必须选择 arm64 + A/B (ab) 版本，例如 arm64_bgN 或 arm64_bvN。",
                             "Root 变体：推荐选择后缀为 N（无内置 su）的包，不要选带内置 su (S) 的包，兼容更稳。",
                             "支持格式：可直接选择 .img、.img.xz、.img.gz 以及 Android Sparse 稀疏镜像，引擎会自动流式解压。",
-                            "常见推荐：优先选用基于 TrebleDroid 的 Android 14 / 15 GSI（如 Ponces AOSP、LineageOS TD）；由于本机底层 Vendor 为 Android 13 (VNDK 33)，部分 Android 16 第三方魔改 GSI 可能因 HAL 兼容问题进不了桌面并自动回退原系统。",
+                            "常见推荐：基于 TrebleDroid 的 Android 14 / 15 / 16 / 17 GSI（如 Ponces AOSP、LineageOS TD、Infinity-X 等）；下一步开启「自动修复 SELinux 冲突」即可自动消除高版本 GSI 与本机 Vendor 33 的策略冲突。",
                         ),
                     )
 
@@ -308,10 +309,26 @@ fun DsuWizard(
                         ),
                     )
 
+                    M3EGroupRow(
+                        title = "自动修复 Android 15/16/17 SELinux 冲突（推荐）",
+                        subtitle = if (fixVendorGenfs) {
+                            "自动检测并剔除与本机 vendor_sepolicy.cil 冲突的 plat_sepolicy_genfs 规则，无冲突则零改动跳过。"
+                        } else {
+                            "已关闭：仅解压并签名，不做 SELinux 策略冲突检测（无需 Root）。"
+                        },
+                        icon = Icons.Rounded.AutoFixHigh,
+                        iconTint = MaterialTheme.colorScheme.primary,
+                        iconBg = MaterialTheme.colorScheme.primaryContainer,
+                        helpDoc = HelpDocs.GSI_GENFS_FIX,
+                        trailing = {
+                            Switch(checked = fixVendorGenfs, onCheckedChange = { fixVendorGenfs = it })
+                        },
+                    )
+
                     M3EPrimaryButton(
                         text = if (state.lastGsiReport == null) "开始计算 Hashtree 并签名验签" else "重新签名所选 GSI",
                         icon = Icons.Rounded.Bolt,
-                        onClick = { vm.signGsiImage(gsiInputPath.trim()) },
+                        onClick = { vm.signGsiImage(gsiInputPath.trim(), fixVendorGenfs = fixVendorGenfs) },
                         enabled = !state.busy && gsiInputPath.isNotBlank() && defaultKey != null,
                         loading = state.busy,
                         modifier = Modifier.fillMaxWidth(),
@@ -350,12 +367,15 @@ fun DsuWizard(
                                     "镜像路径：${rep.outputPath}",
                                 )
                             } else {
-                                listOf(
-                                    "原始镜像：${formatByteSize(rep.originalSize)} → 签后体积：${formatByteSize(rep.finalSize)}",
-                                    "Hashtree 大小：${formatByteSize(rep.treeSize)}",
-                                    "Root Digest：${rep.rootDigest.take(28)}...",
-                                    "输出文件：${rep.outputPath}",
-                                )
+                                buildList {
+                                    add("原始镜像：${formatByteSize(rep.originalSize)} → 签后体积：${formatByteSize(rep.finalSize)}")
+                                    add("Hashtree 大小：${formatByteSize(rep.treeSize)}")
+                                    if (rep.genfsConflictsPatched > 0) {
+                                        add("SELinux 冲突自动修复：已剔除 ${rep.genfsConflictsPatched} 条与本机 Vendor 冲突的 genfscon 规则")
+                                    }
+                                    add("Root Digest：${rep.rootDigest.take(28)}...")
+                                    add("输出文件：${rep.outputPath}")
+                                }
                             },
                         )
                     }

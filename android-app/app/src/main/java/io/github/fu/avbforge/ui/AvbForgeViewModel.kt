@@ -420,14 +420,19 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun signGsiImage(inputPath: String) {
+    fun signGsiImage(inputPath: String, fixVendorGenfs: Boolean = true) {
         val key = vault.getDefaultKey() ?: run {
             _state.update { it.copy(errorBanner = "请先在「密钥」页生成或导入默认 AVB 密钥") }
             return
         }
         viewModelScope.launch {
             val outFile = File(baseWorkDir, "signed_gsi_${System.currentTimeMillis() / 1000}.img")
-            _state.update { it.copy(busy = true, statusMessage = "正在解压/计算 Merkle Hashtree 并签名 GSI...", errorBanner = null) }
+            val msg = if (fixVendorGenfs) {
+                "正在解压、检测/修复 SELinux 冲突并计算 Hashtree 签名 GSI..."
+            } else {
+                "正在解压/计算 Merkle Hashtree 并签名 GSI..."
+            }
+            _state.update { it.copy(busy = true, statusMessage = msg, errorBanner = null) }
             runCatching {
                 vault.withTempPlaintextKey(key.id) { pemFile, _ ->
                     runner.run(
@@ -436,8 +441,9 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                             "--input", inputPath,
                             "--output", outFile.absolutePath,
                             "--key", pemFile.absolutePath,
+                            "--fix-vendor-genfs", fixVendorGenfs.toString(),
                         ),
-                        requireRoot = false,
+                        requireRoot = fixVendorGenfs,
                         timeoutSeconds = 1800,
                         onLog = ::appendLog,
                         onProgress = { p -> _state.update { it.copy(progress = p) } },
@@ -446,12 +452,17 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             }.onSuccess { result ->
                 result.onSuccess { elem ->
                     val rep = runner.json.decodeFromJsonElement<GsiSignReport>(elem)
+                    val doneMsg = if (rep.genfsConflictsPatched > 0) {
+                        "已自动修复 ${rep.genfsConflictsPatched} 处 SELinux 冲突并完成签名验签：${rep.outputPath}"
+                    } else {
+                        "GSI 签名并验签通过：${rep.outputPath}"
+                    }
                     _state.update {
                         it.copy(
                             busy = false,
                             progress = null,
                             lastGsiReport = rep,
-                            statusMessage = "GSI 签名并验签通过：${rep.outputPath}",
+                            statusMessage = doneMsg,
                         )
                     }
                 }.onFailure { err ->

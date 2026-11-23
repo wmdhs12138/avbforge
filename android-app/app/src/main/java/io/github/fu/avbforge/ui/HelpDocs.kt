@@ -100,7 +100,17 @@ object HelpDocs {
         bullets = listOf(
             "支持直接选择 .img、.img.xz、.img.gz 以及 Android Sparse 稀疏镜像，全自动流式解压与转 Raw。",
             "内置 Rust 多线程引擎并行计算 4096 B 分块的 dm-verity SHA-256 Merkle Hashtree，并追加自签名 AVB Footer。",
-            "签名完成后会自动执行一次离线全树验签，确保万无一失才允许交给 gsi_tool。",
+            "自动写入符合回锁防回滚要求的 security_patch 属性，并执行离线全树验签，确保万无一失才交给 gsi_tool。",
+        ),
+    )
+
+    val GSI_GENFS_FIX = HelpDoc(
+        title = "自动修复 Android 15/16/17 SELinux 冲突",
+        summary = "解决高版本 GSI 在 Android 13 Vendor (VNDK 33) 机型上因 secilc 策略编译冲突导致无法开机的问题。",
+        bullets = listOf(
+            "Android 15/16/17 GSI 新增的 plat_sepolicy_genfs_*.cil 规则（例如 /power/mem_sleep、/class/typec）经常与本机 /vendor/etc/selinux/vendor_sepolicy.cil 重复定义。",
+            "开启后，签名引擎会先以只读方式快速扫描 GSI；若未发现冲突则零修改直接跳过；若发现冲突则自动剔除冲突行并无损压缩 ext4 镜像后再签名。",
+            "此功能仅在扫描/修补 ext4 时短暂调用 Root 挂载循环设备，不修改原厂系统任何文件。",
         ),
     )
 

@@ -8,8 +8,9 @@ use bootimg::{
     is_sparse_image, stream_decompress_file, unsparse_image, BootImageV3V4, CompressionFormat,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -45,6 +46,8 @@ pub struct GsiSignReport {
     pub tree_size: u64,
     pub root_digest: String,
     pub pubkey_sha1: String,
+    #[serde(default)]
+    pub genfs_conflicts_patched: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -351,9 +354,12 @@ fn resign_hash_partition(
     Ok(())
 }
 
-/// Decompress (if .xz/.gz), unsparse (if sparse), strip old footer, and sign a GSI with AVB hashtree footer.
+/// Decompress (if .xz/.gz), unsparse (if sparse), strip old footer, optionally auto-patch
+/// SELinux `genfscon` conflicts against host `/vendor/etc/selinux/vendor_sepolicy.cil`, and sign
+/// a GSI with AVB hashtree footer.
 /// Automatically injects `com.android.build.system.security_patch` (>= host SPL) so locked Yellow
 /// devices pass AOSP `IsStandaloneImageRollback()` during `first_stage_mount`!
+#[allow(clippy::too_many_arguments)]
 pub fn sign_gsi(
     input_path: &Path,
     output_path: &Path,
@@ -361,6 +367,7 @@ pub fn sign_gsi(
     passphrase: Option<&str>,
     partition_size: Option<u64>,
     security_patch_override: Option<&str>,
+    fix_vendor_genfs: bool,
 ) -> Result<GsiSignReport> {
     let priv_key = AvbPrivateKey::from_pem_file(key_pem, passphrase)?;
     let pub_key = priv_key.public_key()?;
@@ -408,6 +415,15 @@ pub fn sign_gsi(
     if erase_footer(&work_img)? {
         emit_log("info", "Stripped pre-existing AVB footer from GSI.");
     }
+
+    // Step 3.5: optionally auto-detect & strip conflicting `plat_sepolicy_genfs_*.cil` rules
+    // against host Vendor 33 `vendor_sepolicy.cil` (fixes Android 15/16/17 GSI secilc boot failures!)
+    let genfs_conflicts_patched = if fix_vendor_genfs {
+        let short_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+        patch_gsi_vendor_genfs_conflicts(&work_img, short_parent)?
+    } else {
+        0
+    };
 
     // Compute a safe security_patch >= host SPL so locked Yellow devices never fail IsStandaloneImageRollback()
     let host_spl = crate::device::getprop("ro.build.version.security_patch");
@@ -474,7 +490,401 @@ pub fn sign_gsi(
         tree_size: ht_desc.tree_size,
         root_digest: hex::encode(&ht_desc.root_digest),
         pubkey_sha1: pub_key.sha1_hex(),
+        genfs_conflicts_patched,
     })
+}
+
+/// Extract `(filesystem, quoted_path)` from a CIL line like:
+/// `(genfscon sysfs "/power/mem_sleep" (u object_r sysfs_power ((s0) (s0))))`
+pub(crate) fn parse_genfscon_key(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("(genfscon")?;
+    let first_ws = rest.chars().next()?;
+    if !first_ws.is_whitespace() {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let ws_idx = rest.find(char::is_whitespace)?;
+    let fs_type = &rest[..ws_idx];
+    let after_fs = rest[ws_idx..].trim_start();
+    let after_quote = after_fs.strip_prefix('"')?;
+    let end_quote = after_quote.find('"')?;
+    let path = &after_quote[..end_quote];
+    Some((fs_type.to_string(), path.to_string()))
+}
+
+pub(crate) fn collect_genfscon_keys(cil_text: &str) -> HashSet<(String, String)> {
+    cil_text.lines().filter_map(parse_genfscon_key).collect()
+}
+
+/// Remove lines whose `(genfscon <fs> "<path>" ...)` collides with `vendor_keys`.
+/// Returns `(filtered_content, removed_line_count, distinct_conflicts)`.
+pub(crate) fn filter_conflicting_genfscon(
+    cil_text: &str,
+    vendor_keys: &HashSet<(String, String)>,
+) -> (String, usize, Vec<(String, String)>) {
+    let mut out = String::with_capacity(cil_text.len());
+    let mut removed = 0usize;
+    let mut hits = Vec::new();
+    let mut seen = HashSet::new();
+    for line in cil_text.split_inclusive('\n') {
+        if let Some(key) = parse_genfscon_key(line) {
+            if vendor_keys.contains(&key) {
+                removed += 1;
+                if seen.insert(key.clone()) {
+                    hits.push(key);
+                }
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    (out, removed, hits)
+}
+
+fn is_ext4_image(path: &Path) -> Result<bool> {
+    let mut f = fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    if len < 2048 {
+        return Ok(false);
+    }
+    f.seek(SeekFrom::Start(1024 + 56))?;
+    let mut magic = [0u8; 2];
+    f.read_exact(&mut magic)?;
+    Ok(magic == [0x53, 0xEF])
+}
+
+fn resolve_tool(name: &str) -> PathBuf {
+    for prefix in ["/system/bin", "/vendor/bin", "/sbin"] {
+        let p = Path::new(prefix).join(name);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn run_e2fsck(img: &Path, extra_args: &[&str]) -> Result<()> {
+    let bin = resolve_tool("e2fsck");
+    let mut cmd = Command::new(&bin);
+    cmd.args(["-f", "-y"]);
+    cmd.args(extra_args);
+    cmd.arg(img);
+    let out = cmd
+        .output()
+        .with_context(|| format!("Failed to execute {}", bin.display()))?;
+    // e2fsck exit codes: 0 = no errors, 1 = corrected, 2 = corrected (reboot suggested)
+    let code = out.status.code().unwrap_or(-1);
+    if code != 0 && code != 1 && code != 2 {
+        bail!(
+            "e2fsck {:?} failed (exit {code}): {} {}",
+            extra_args,
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn run_resize2fs(img: &Path, shrink_min: bool) -> Result<()> {
+    let bin = resolve_tool("resize2fs");
+    let mut cmd = Command::new(&bin);
+    if shrink_min {
+        cmd.arg("-M");
+    }
+    cmd.arg(img);
+    let out = cmd
+        .output()
+        .with_context(|| format!("Failed to execute {}", bin.display()))?;
+    if !out.status.success() {
+        bail!(
+            "resize2fs (shrink={shrink_min}) failed: {} {}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+struct RenameBackGuard {
+    current: PathBuf,
+    original: PathBuf,
+    active: bool,
+}
+
+impl RenameBackGuard {
+    fn move_to(original: &Path, temp_short: &Path) -> Result<Self> {
+        fs::rename(original, temp_short).with_context(|| {
+            format!(
+                "Failed to move {} -> {} for short-path loop mount",
+                original.display(),
+                temp_short.display()
+            )
+        })?;
+        Ok(Self {
+            current: temp_short.to_path_buf(),
+            original: original.to_path_buf(),
+            active: true,
+        })
+    }
+
+    fn restore(mut self) -> Result<()> {
+        if self.active {
+            self.active = false;
+            fs::rename(&self.current, &self.original).with_context(|| {
+                format!(
+                    "Failed to restore {} -> {}",
+                    self.current.display(),
+                    self.original.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RenameBackGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::rename(&self.current, &self.original);
+            self.active = false;
+        }
+    }
+}
+
+struct LoopMountGuard {
+    mnt_dir: PathBuf,
+    mounted: bool,
+}
+
+impl LoopMountGuard {
+    fn mount(img: &Path, mnt_dir: &Path, rw: bool) -> Result<Self> {
+        fs::create_dir_all(mnt_dir)?;
+        let opts = if rw { "rw,loop" } else { "ro,loop" };
+        let mount_bin = resolve_tool("mount");
+        let out = Command::new(&mount_bin)
+            .args(["-o", opts])
+            .arg(img)
+            .arg(mnt_dir)
+            .output()
+            .with_context(|| format!("Failed to execute {}", mount_bin.display()))?;
+        if !out.status.success() {
+            let _ = fs::remove_dir(mnt_dir);
+            bail!(
+                "mount -o {opts} {} {} failed: {}",
+                img.display(),
+                mnt_dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(Self {
+            mnt_dir: mnt_dir.to_path_buf(),
+            mounted: true,
+        })
+    }
+
+    fn unmount(mut self) -> Result<()> {
+        if self.mounted {
+            let _ = Command::new(resolve_tool("sync")).status();
+            let umount_bin = resolve_tool("umount");
+            let out = Command::new(&umount_bin).arg(&self.mnt_dir).output()?;
+            self.mounted = false;
+            let _ = fs::remove_dir(&self.mnt_dir);
+            if !out.status.success() {
+                bail!(
+                    "umount {} failed: {}",
+                    self.mnt_dir.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LoopMountGuard {
+    fn drop(&mut self) {
+        if self.mounted {
+            let _ = Command::new(resolve_tool("sync")).status();
+            let _ = Command::new(resolve_tool("umount")).arg(&self.mnt_dir).status();
+            self.mounted = false;
+        }
+        let _ = fs::remove_dir(&self.mnt_dir);
+    }
+}
+
+fn find_plat_genfs_cils(mnt: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    for rel in ["system/etc/selinux", "etc/selinux"] {
+        let dir = mnt.join(rel);
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("plat_sepolicy_genfs_") && name_str.ends_with(".cil") {
+                    results.push(entry.path());
+                }
+            }
+        }
+    }
+    results.sort();
+    results
+}
+
+/// Inspect a raw GSI ext4 image for `plat_sepolicy_genfs_*.cil` rules colliding with host
+/// `/vendor/etc/selinux/vendor_sepolicy.cil` (and `/odm/etc/selinux/odm_sepolicy.cil`).
+/// - Zero-overhead fast path: mounts RO first; if 0 conflicts, returns `Ok(0)` immediately.
+/// - Auto-patch path: expands +512 MiB, unshares ext4 `shared_blocks`, strips colliding lines,
+///   restores SELinux file context, and shrinks ext4 back with `resize2fs -M`.
+fn patch_gsi_vendor_genfs_conflicts(work_img: &Path, short_parent: &Path) -> Result<usize> {
+    // 1. Collect host vendor genfscon rules
+    let mut vendor_keys = HashSet::new();
+    let mut loaded_host_files = 0usize;
+    for host_cil in [
+        Path::new("/vendor/etc/selinux/vendor_sepolicy.cil"),
+        Path::new("/odm/etc/selinux/odm_sepolicy.cil"),
+    ] {
+        if let Ok(text) = fs::read_to_string(host_cil) {
+            vendor_keys.extend(collect_genfscon_keys(&text));
+            loaded_host_files += 1;
+        }
+    }
+    if loaded_host_files == 0 || vendor_keys.is_empty() {
+        emit_log(
+            "info",
+            "Host vendor_sepolicy.cil not present; skipping SELinux genfscon conflict check.",
+        );
+        return Ok(0);
+    }
+
+    if !is_ext4_image(work_img)? {
+        emit_log(
+            "info",
+            "GSI image is not ext4; skipping automatic SELinux genfscon check.",
+        );
+        return Ok(0);
+    }
+
+    // 2. Stage at a <= 60 byte path (Android toybox losetup rejects paths > 64 bytes after symlink
+    //    resolution, and FUSE /storage/emulated/0 avoids F2FS inlinecrypt RW loop I/O errors!)
+    let canon_parent = fs::canonicalize(short_parent).unwrap_or_else(|_| short_parent.to_path_buf());
+    let candidate = canon_parent.join(".g.img");
+    let short_img = if candidate.to_string_lossy().len() <= 60 {
+        candidate
+    } else if Path::new("/storage/emulated/0/Download").is_dir() {
+        PathBuf::from("/storage/emulated/0/Download/.g.img")
+    } else {
+        candidate
+    };
+    if short_img.exists() {
+        let _ = fs::remove_file(&short_img);
+    }
+    let rename_guard = RenameBackGuard::move_to(work_img, &short_img)?;
+
+    let mnt_dir = PathBuf::from(format!("/data/local/tmp/avbf_gmnt_{}", std::process::id()));
+
+    // 3. Fast read-only pre-scan
+    let ro_guard = match LoopMountGuard::mount(&short_img, &mnt_dir, false) {
+        Ok(g) => g,
+        Err(e) => {
+            emit_log(
+                "warn",
+                &format!("Unable to loop-mount GSI for SELinux genfscon check (need root): {e}; skipping auto-patch."),
+            );
+            rename_guard.restore()?;
+            return Ok(0);
+        }
+    };
+
+    let mut total_conflicts = 0usize;
+    let mut distinct_conflicts: Vec<(String, String)> = Vec::new();
+    let mut seen_conflicts: HashSet<(String, String)> = HashSet::new();
+    let cil_files = find_plat_genfs_cils(&mnt_dir);
+    for cil in &cil_files {
+        if let Ok(text) = fs::read_to_string(cil) {
+            let (_, cnt, hits) = filter_conflicting_genfscon(&text, &vendor_keys);
+            total_conflicts += cnt;
+            for h in hits {
+                if seen_conflicts.insert(h.clone()) {
+                    distinct_conflicts.push(h);
+                }
+            }
+        }
+    }
+    ro_guard.unmount()?;
+
+    if total_conflicts == 0 {
+        emit_log(
+            "info",
+            &format!(
+                "SELinux genfscon check passed ({} plat_sepolicy_genfs file(s) scanned, 0 conflicts with host vendor).",
+                cil_files.len()
+            ),
+        );
+        rename_guard.restore()?;
+        return Ok(0);
+    }
+
+    let conflict_summary = distinct_conflicts
+        .iter()
+        .map(|(fs_t, p)| format!("{fs_t}:{p}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    emit_log(
+        "info",
+        &format!(
+            "Detected {total_conflicts} SELinux genfscon conflict(s) with host vendor_sepolicy.cil ({conflict_summary}). Auto-patching GSI ext4..."
+        ),
+    );
+
+    // 4. Expand +512 MiB and unshare ext4 shared_blocks so RW mount & edits succeed cleanly
+    let cur_len = fs::metadata(&short_img)?.len();
+    {
+        let f = fs::OpenOptions::new().write(true).open(&short_img)?;
+        f.set_len(cur_len + 512 * 1024 * 1024)?;
+        f.sync_all()?;
+    }
+    run_e2fsck(&short_img, &[])?;
+    run_resize2fs(&short_img, false)?;
+    run_e2fsck(&short_img, &["-E", "unshare_blocks"])?;
+    run_e2fsck(&short_img, &[])?;
+
+    // 5. Mount RW and strip colliding genfscon lines
+    let rw_guard = LoopMountGuard::mount(&short_img, &mnt_dir, true)?;
+    let mut patched_lines = 0usize;
+    let mut patched_files = 0usize;
+    for cil in find_plat_genfs_cils(&mnt_dir) {
+        let text = fs::read_to_string(&cil)?;
+        let (filtered, removed, _) = filter_conflicting_genfscon(&text, &vendor_keys);
+        if removed > 0 {
+            fs::write(&cil, filtered.as_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&cil, fs::Permissions::from_mode(0o644));
+            }
+            let _ = Command::new(resolve_tool("chcon"))
+                .args(["u:object_r:system_file:s0"])
+                .arg(&cil)
+                .status();
+            patched_lines += removed;
+            patched_files += 1;
+        }
+    }
+    rw_guard.unmount()?;
+
+    // 6. Shrink ext4 back to minimal size before Merkle hashtree signing
+    run_e2fsck(&short_img, &[])?;
+    run_resize2fs(&short_img, true)?;
+
+    rename_guard.restore()?;
+    emit_log(
+        "info",
+        &format!(
+            "Auto-patched {patched_lines} conflicting SELinux genfscon line(s) across {patched_files} file(s) and shrunk ext4 image."
+        ),
+    );
+    Ok(patched_lines)
 }
 
 struct TempFileGuard(Option<PathBuf>);
@@ -694,4 +1104,35 @@ pub fn export_clean_init_boot(
         stripped_kernelsu,
         existing_dsu_keys,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn genfscon_parser_and_conflict_filter() {
+        let vendor_cil = r#"
+(genfscon sysfs "/power/mem_sleep" (u object_r vendor_sysfs_suspend ((s0) (s0))))
+(genfscon sysfs "/class/typec" (u object_r vendor_sysfs_usb_c ((s0) (s0))))
+(typeattributeset base_typeattr_1 (vendor_sysfs_suspend))
+"#;
+        let vendor_keys = collect_genfscon_keys(vendor_cil);
+        assert_eq!(vendor_keys.len(), 2);
+        assert!(vendor_keys.contains(&("sysfs".into(), "/power/mem_sleep".into())));
+        assert!(vendor_keys.contains(&("sysfs".into(), "/class/typec".into())));
+
+        let plat_cil = r#"(genfscon sysfs "/class/udc" (u object_r sysfs_udc ((s0) (s0))))
+(genfscon sysfs "/power/mem_sleep" (u object_r sysfs_power ((s0) (s0))))
+(genfscon sysfs "/class/typec" (u object_r sysfs_typec ((s0) (s0))))
+(genfscon sysfs "/kernel/firmware_config" (u object_r sysfs_fw ((s0) (s0))))
+"#;
+        let (filtered, removed, hits) = filter_conflicting_genfscon(plat_cil, &vendor_keys);
+        assert_eq!(removed, 2);
+        assert_eq!(hits.len(), 2);
+        assert!(filtered.contains("\"/class/udc\""));
+        assert!(filtered.contains("\"/kernel/firmware_config\""));
+        assert!(!filtered.contains("\"/power/mem_sleep\""));
+        assert!(!filtered.contains("\"/class/typec\""));
+    }
 }
