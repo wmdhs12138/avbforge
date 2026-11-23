@@ -11,10 +11,12 @@ import io.github.fu.avbforge.core.SafetyGate
 import io.github.fu.avbforge.data.BackupManifest
 import io.github.fu.avbforge.data.CoreProgress
 import io.github.fu.avbforge.data.DeviceSnapshot
+import io.github.fu.avbforge.data.DsuInfoReport
 import io.github.fu.avbforge.data.ExportCleanInitBootReport
 import io.github.fu.avbforge.data.ForgeBundleReport
 import io.github.fu.avbforge.data.GsiSignReport
 import io.github.fu.avbforge.data.KeyEntry
+import io.github.fu.avbforge.data.LocalGsiImage
 import io.github.fu.avbforge.data.PatchDsuKeyReport
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +44,8 @@ data class UiState(
     val lastDsuPatchReport: PatchDsuKeyReport? = null,
     val lastGsiReport: GsiSignReport? = null,
     val dsuStatusText: String = "unknown",
+    val dsuInfo: DsuInfoReport? = null,
+    val localGsiImages: List<LocalGsiImage> = emptyList(),
     val errorBanner: String? = null,
 )
 
@@ -94,9 +98,11 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         snapshot = snap,
                         dsuStatusText = snap.dsuStatus,
                         keys = vault.listKeys(),
+                        localGsiImages = scanLocalGsiImages(),
                         statusMessage = "体检完成 (${snap.model} / Android ${snap.androidRelease} / ${snap.activeSlot})",
                     )
                 }
+                refreshDsuInfo(silent = true)
             }.onFailure { err ->
                 _state.update {
                     it.copy(
@@ -467,6 +473,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                             busy = false,
                             progress = null,
                             lastGsiReport = rep,
+                            localGsiImages = scanLocalGsiImages(),
                             statusMessage = doneMsg,
                         )
                     }
@@ -510,21 +517,153 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         statusMessage = "DSU 安装就绪（单次启动=${singleBoot}），现在重启即可进入 GSI！",
                     )
                 }
+                refreshDsuInfo(silent = true)
             }.onFailure { err ->
                 _state.update { it.copy(busy = false, progress = null, errorBanner = "DSU 安装失败：${err.message}") }
             }
         }
     }
 
+    private fun scanLocalGsiImages(): List<LocalGsiImage> {
+        val dir = baseWorkDir
+        val minGsiBytes = 100L * 1024L * 1024L // Filter out 8MB init_boot / small boot images
+        val files = dir.listFiles().orEmpty()
+        return files
+            .filter { f ->
+                f.isFile &&
+                    !f.name.startsWith(".") &&
+                    f.length() >= minGsiBytes &&
+                    (f.name.endsWith(".img", ignoreCase = true) ||
+                        f.name.endsWith(".img.xz", ignoreCase = true) ||
+                        f.name.endsWith(".img.gz", ignoreCase = true) ||
+                        f.name.endsWith(".xz", ignoreCase = true) ||
+                        f.name.endsWith(".gz", ignoreCase = true))
+            }
+            .sortedByDescending { it.lastModified() }
+            .map { f ->
+                LocalGsiImage(
+                    name = f.name,
+                    path = f.absolutePath,
+                    sizeBytes = f.length(),
+                    lastModified = f.lastModified(),
+                )
+            }
+    }
+
+    fun refreshLocalGsiImages() {
+        _state.update { it.copy(localGsiImages = scanLocalGsiImages()) }
+    }
+
+    fun deleteLocalGsiImage(path: String) {
+        runCatching {
+            val f = File(path)
+            if (f.parentFile?.canonicalPath != baseWorkDir.canonicalPath) {
+                error("仅允许删除 Download/AVBForge 目录下的本地镜像")
+            }
+            if (!f.delete()) error("文件删除失败")
+        }.onSuccess {
+            _state.update {
+                it.copy(
+                    localGsiImages = scanLocalGsiImages(),
+                    statusMessage = "已删除本地镜像 ${File(path).name} 并释放存储空间",
+                )
+            }
+        }.onFailure { err ->
+            _state.update { it.copy(errorBanner = "删除镜像失败：${err.message}") }
+        }
+    }
+
+    fun refreshDsuInfo(silent: Boolean = false) {
+        viewModelScope.launch {
+            if (!silent) {
+                _state.update { it.copy(busy = true, statusMessage = "正在刷新本机 DSU / GSI 状态...", errorBanner = null) }
+            }
+            val res = runner.run(args = listOf("dsu", "info"), requireRoot = true, onLog = ::appendLog)
+            val localImgs = scanLocalGsiImages()
+            res.onSuccess { elem ->
+                val info = runner.json.decodeFromJsonElement<DsuInfoReport>(elem)
+                _state.update {
+                    it.copy(
+                        busy = if (silent) it.busy else false,
+                        dsuInfo = info,
+                        dsuStatusText = info.rawStatus,
+                        localGsiImages = localImgs,
+                        statusMessage = if (silent) it.statusMessage else "DSU 状态已更新",
+                    )
+                }
+            }.onFailure { err ->
+                _state.update {
+                    it.copy(
+                        busy = if (silent) it.busy else false,
+                        localGsiImages = localImgs,
+                        errorBanner = if (silent) it.errorBanner else "读取 DSU 状态失败：${err.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    fun enableDsu(singleBoot: Boolean) {
+        viewModelScope.launch {
+            val modeText = if (singleBoot) "单次防变砖启动 (-s)" else "持续启动"
+            _state.update { it.copy(busy = true, statusMessage = "正在启用 GSI（$modeText）...", errorBanner = null) }
+            val res = runner.run(
+                args = listOf("dsu", "enable", "--single-boot", singleBoot.toString()),
+                requireRoot = true,
+                onLog = ::appendLog,
+            )
+            res.onSuccess {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        statusMessage = "已启用 GSI（$modeText），现在重启即可进入！",
+                    )
+                }
+                refreshDsuInfo(silent = true)
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "启用 DSU 失败：${err.message}") }
+            }
+        }
+    }
+
+    fun wipeDsuData() {
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, statusMessage = "正在重置 GSI 独立 Userdata（保留系统镜像）...", errorBanner = null) }
+            val res = runner.run(args = listOf("dsu", "wipe-data"), requireRoot = true, onLog = ::appendLog)
+            res.onSuccess {
+                _state.update { it.copy(busy = false, statusMessage = "已标记重置 GSI 数据，下次进入 GSI 将重新初始化（不影响原系统）") }
+                refreshDsuInfo(silent = true)
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "重置 GSI 数据失败：${err.message}") }
+            }
+        }
+    }
+
+    fun rebootToDsu() {
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, statusMessage = "正在重启设备进入 GSI...", errorBanner = null) }
+            val res = runner.run(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
+            res.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "重启失败：${err.message}") }
+            }
+        }
+    }
+
     fun runDsuSimple(action: String) {
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, statusMessage = "执行 gsi_tool $action...", errorBanner = null) }
+            val label = when (action) {
+                "disable" -> "禁用 DSU"
+                "wipe" -> "彻底卸载 DSU 并释放空间"
+                else -> "执行 gsi_tool $action"
+            }
+            _state.update { it.copy(busy = true, statusMessage = "正在$label...", errorBanner = null) }
             val res = runner.run(args = listOf("dsu", action), requireRoot = true, onLog = ::appendLog)
             res.onSuccess {
-                _state.update { it.copy(busy = false, statusMessage = "DSU $action 完成") }
+                _state.update { it.copy(busy = false, statusMessage = "${label}完成") }
+                refreshDsuInfo(silent = true)
                 refreshDevice()
             }.onFailure { err ->
-                _state.update { it.copy(busy = false, errorBanner = "DSU $action 失败：${err.message}") }
+                _state.update { it.copy(busy = false, errorBanner = "${label}失败：${err.message}") }
             }
         }
     }

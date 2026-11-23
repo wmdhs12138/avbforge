@@ -61,6 +61,7 @@ import io.github.fu.avbforge.ui.components.ActiveWizard
 import io.github.fu.avbforge.ui.components.M3EGroupRow
 import io.github.fu.avbforge.ui.components.M3EHelpButton
 import io.github.fu.avbforge.ui.components.M3ESectionLabel
+import io.github.fu.avbforge.ui.components.formatByteSize
 
 private data class ScenarioEntry(
     val wizard: ActiveWizard,
@@ -127,6 +128,29 @@ fun HomeHubScreen(
         else -> MaterialTheme.colorScheme.onPrimaryContainer
     }
 
+    val dsuInfo = state.dsuInfo
+    val dsuShortStatus = when {
+        !dsuReady -> "未注入公钥"
+        dsuInfo?.running == true -> "GSI 运行中"
+        dsuInfo?.enabled == true -> if (dsuInfo.oneShot) "已启用 · 单次" else "已启用 · 持续"
+        dsuInfo?.installed == true -> "已安装 · 未启用"
+        snap?.dsuStatus?.contains("enabled", ignoreCase = true) == true -> "已启用 · 待重启"
+        snap?.dsuStatus?.contains("installed", ignoreCase = true) == true -> "已安装 · 未启用"
+        else -> "已就绪 · 未安装"
+    }
+    val dsuScenarioBadge = when {
+        !dsuReady -> "首次适配"
+        dsuInfo?.enabled == true -> "待重启进入"
+        dsuInfo?.installed == true -> "已安装 GSI"
+        else -> "已就绪"
+    }
+    val dsuScenarioSubtitle = when {
+        !dsuReady -> "首次使用会先无损注入 DSU 公钥，再引导你签名并体验 GSI"
+        dsuInfo?.enabled == true -> "GSI 已启用（占用 ${formatByteSize(dsuInfo.totalDiskBytes)}）· 点击一键重启、切换模式或清理"
+        dsuInfo?.installed == true -> "已安装 GSI（占用 ${formatByteSize(dsuInfo.totalDiskBytes)}）· 点击一键启用、重置数据或安装新包"
+        else -> "本机 DSU 已就绪 · 管理本地镜像、自动修复 SELinux 冲突并安装 GSI"
+    }
+
     // State-aware smart ordering of scenarios
     val scenarios = if (isYellow) {
         listOf(
@@ -140,13 +164,9 @@ fun HomeHubScreen(
             ),
             ScenarioEntry(
                 wizard = ActiveWizard.DSU_STUDIO,
-                title = "体验第三方 GSI（DSU 双系统）",
-                subtitle = if (dsuReady) {
-                    "本机 DSU 已就绪 · 一键多线程签名并安全单次启动 GSI"
-                } else {
-                    "首次使用会先无损注入 DSU 公钥，再引导你签名并体验 GSI"
-                },
-                badge = if (dsuReady) "已就绪" else "首次适配",
+                title = "GSI / DSU 双系统管理",
+                subtitle = dsuScenarioSubtitle,
+                badge = dsuScenarioBadge,
                 highlighted = true,
                 icon = Icons.Rounded.SystemUpdate,
             ),
@@ -294,8 +314,8 @@ fun HomeHubScreen(
                                 modifier = Modifier.weight(1f),
                             )
                             StatusMiniTile(
-                                label = "DSU 自签名",
-                                value = if (dsuReady) "已就绪 (${snap.dsuStatus})" else "未注入公钥",
+                                label = "DSU 双系统",
+                                value = dsuShortStatus,
                                 fg = heroFg,
                                 modifier = Modifier.weight(1f),
                             )

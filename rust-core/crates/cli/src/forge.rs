@@ -61,6 +61,20 @@ pub struct ExportCleanInitBootReport {
     pub existing_dsu_keys: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DsuInfoReport {
+    pub installed: bool,
+    pub enabled: bool,
+    pub running: bool,
+    pub one_shot: bool,
+    pub slot_name: Option<String>,
+    pub system_size_bytes: u64,
+    pub userdata_size_bytes: u64,
+    pub total_disk_bytes: u64,
+    pub avb_pubkey_sha1: Option<String>,
+    pub raw_status: String,
+}
+
 /// Inject an AVB public key (optional when `inject_dsu_key == false`) into `init_boot` (or `boot`) ramdisk and re-sign preserving original AVB metadata.
 #[allow(clippy::too_many_arguments)]
 pub fn patch_dsu_key(
@@ -1013,6 +1027,137 @@ pub fn dsu_cmd(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+pub(crate) fn parse_gsi_tool_status(raw: &str) -> DsuInfoReport {
+    let mut installed = false;
+    let mut enabled = false;
+    let mut running = false;
+    let mut slot_name: Option<String> = None;
+    let mut avb_pubkey_sha1: Option<String> = None;
+    let mut current_partition: Option<String> = None;
+
+    for line in raw.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        match line {
+            "installed" => installed = true,
+            "enabled" => enabled = true,
+            "disabled" => enabled = false,
+            "running" => {
+                running = true;
+                installed = true;
+            }
+            _ => {}
+        }
+        if line.starts_with('[') {
+            if let Some(idx) = line.find(']') {
+                let s = line[idx + 1..].trim();
+                if !s.is_empty() && slot_name.is_none() {
+                    slot_name = Some(s.to_string());
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("installed:") {
+            current_partition = Some(rest.trim().to_string());
+            installed = true;
+        } else if let Some(rest) = line.strip_prefix("AVB public key (sha1):") {
+            let val = rest.trim();
+            if !val.is_empty()
+                && !val.eq_ignore_ascii_case("[NONE]")
+                && current_partition
+                    .as_deref()
+                    .map(|p| p.starts_with("system"))
+                    .unwrap_or(true)
+            {
+                avb_pubkey_sha1 = Some(val.to_string());
+            }
+        }
+    }
+
+    DsuInfoReport {
+        installed,
+        enabled,
+        running,
+        one_shot: false,
+        slot_name,
+        system_size_bytes: 0,
+        userdata_size_bytes: 0,
+        total_disk_bytes: 0,
+        avb_pubkey_sha1,
+        raw_status: raw.trim().to_string(),
+    }
+}
+
+fn scan_dsu_dir_sizes(dir: &Path, sys: &mut u64, usr: &mut u64, total: &mut u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            scan_dsu_dir_sizes(&path, sys, usr, total);
+        } else if meta.is_file() {
+            let len = meta.len();
+            *total += len;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("system_gsi") {
+                *sys += len;
+            } else if name.starts_with("userdata_gsi") {
+                *usr += len;
+            }
+        }
+    }
+}
+
+pub fn dsu_info() -> Result<DsuInfoReport> {
+    let raw = dsu_cmd(&["status"]).unwrap_or_else(|_| "unknown".to_string());
+    let mut info = parse_gsi_tool_status(&raw);
+
+    if info.installed {
+        let mut sys = 0u64;
+        let mut usr = 0u64;
+        let mut total = 0u64;
+        let base = Path::new("/data/gsi/dsu");
+        if base.is_dir() {
+            scan_dsu_dir_sizes(base, &mut sys, &mut usr, &mut total);
+        }
+        info.system_size_bytes = sys;
+        info.userdata_size_bytes = usr;
+        info.total_disk_bytes = total;
+    }
+
+    if info.enabled {
+        let one_shot_path = Path::new("/metadata/gsi/dsu/one_shot_boot");
+        let slot_one_shot = info
+            .slot_name
+            .as_deref()
+            .map(|s| PathBuf::from(format!("/metadata/gsi/dsu/{s}/one_shot_boot")));
+        info.one_shot = one_shot_path.exists()
+            || slot_one_shot.as_ref().map(|p| p.exists()).unwrap_or(false);
+    }
+
+    Ok(info)
+}
+
+pub fn dsu_reboot() -> Result<String> {
+    emit_log("info", "Issuing system reboot...");
+    let status = Command::new("/system/bin/svc")
+        .args(["power", "reboot"])
+        .status();
+    if matches!(status, Ok(s) if s.success()) {
+        return Ok("rebooting".to_string());
+    }
+    let out = Command::new("/system/bin/reboot")
+        .output()
+        .context("Failed to execute /system/bin/reboot")?;
+    if !out.status.success() {
+        bail!("reboot failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok("rebooting".to_string())
+}
+
 pub fn export_stock_init_boot(output_path: &Path, slot_override: Option<&str>) -> Result<PathBuf> {
     let slot = match slot_override {
         Some(s) => s.to_string(),
@@ -1134,5 +1279,28 @@ mod tests {
         assert!(filtered.contains("\"/kernel/firmware_config\""));
         assert!(!filtered.contains("\"/power/mem_sleep\""));
         assert!(!filtered.contains("\"/class/typec\""));
+    }
+
+    #[test]
+    fn parse_gsi_tool_status_variants() {
+        let normal = parse_gsi_tool_status("normal\n");
+        assert!(!normal.installed);
+        assert!(!normal.enabled);
+        assert!(normal.avb_pubkey_sha1.is_none());
+
+        let disabled = parse_gsi_tool_status(
+            "installed\ndisabled\n[0] dsu\ninstalled: userdata_gsi\nAVB public key (sha1): [NONE]\ninstalled: system_gsi\nAVB public key (sha1): 1c69d097e111ed8ae814fc7bf8957ec0721c654d\n",
+        );
+        assert!(disabled.installed);
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.slot_name.as_deref(), Some("dsu"));
+        assert_eq!(
+            disabled.avb_pubkey_sha1.as_deref(),
+            Some("1c69d097e111ed8ae814fc7bf8957ec0721c654d")
+        );
+
+        let enabled = parse_gsi_tool_status("installed\nenabled\n[0] dsu\n");
+        assert!(enabled.installed);
+        assert!(enabled.enabled);
     }
 }

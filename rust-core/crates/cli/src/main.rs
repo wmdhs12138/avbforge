@@ -242,6 +242,7 @@ enum GsiAction {
 #[derive(Subcommand)]
 enum DsuAction {
     Status,
+    Info,
     Install {
         #[arg(long)]
         image: PathBuf,
@@ -258,6 +259,8 @@ enum DsuAction {
     },
     Disable,
     Wipe,
+    WipeData,
+    Reboot,
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -542,6 +545,10 @@ fn run(cli: Cli) -> Result<()> {
                 let st = forge::dsu_cmd(&["status"])?;
                 emit_result(json!({ "status": st }));
             }
+            DsuAction::Info => {
+                let info = forge::dsu_info()?;
+                emit_result(info);
+            }
             DsuAction::Install {
                 image,
                 userdata_size,
@@ -571,6 +578,14 @@ fn run(cli: Cli) -> Result<()> {
             }
             DsuAction::Wipe => {
                 let st = forge::dsu_cmd(&["wipe"])?;
+                emit_result(json!({ "output": st }));
+            }
+            DsuAction::WipeData => {
+                let st = forge::dsu_cmd(&["wipe-data"])?;
+                emit_result(json!({ "output": st }));
+            }
+            DsuAction::Reboot => {
+                let st = forge::dsu_reboot()?;
                 emit_result(json!({ "output": st }));
             }
         },

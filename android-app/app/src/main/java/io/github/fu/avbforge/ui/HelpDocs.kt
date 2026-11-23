@@ -132,6 +132,15 @@ object HelpDocs {
         ),
     )
 
+    val DSU_WIPE_DATA = HelpDoc(
+        title = "重置 GSI 数据 vs 彻底卸载",
+        summary = "两种清理方式均完全隔离，绝不会影响原厂 OriginOS 的任何数据。",
+        bullets = listOf(
+            "仅重置 GSI 数据（wipe-data）：只清空 GSI 的独立 /data 分区，下次进入 GSI 会重新走开机向导，但无需重新安装 3 GB+ 的系统镜像。",
+            "彻底卸载（wipe）：删除 /data/gsi/dsu 下全部系统与数据镜像，立刻释放十余 GB 机身存储空间。",
+        ),
+    )
+
     val AVB_CHAIN_FSTAB = HelpDoc(
         title = "AVB 链式分区与 fstab 详情",
         summary = "只读展示本机底层的两项关键校验配置，不会修改任何分区。",

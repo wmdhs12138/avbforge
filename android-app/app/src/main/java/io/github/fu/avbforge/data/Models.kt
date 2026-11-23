@@ -117,6 +117,27 @@ data class FlashReport(
     @SerialName("avb_verified") val avbVerified: Boolean,
 )
 
+@Serializable
+data class DsuInfoReport(
+    val installed: Boolean = false,
+    val enabled: Boolean = false,
+    val running: Boolean = false,
+    @SerialName("one_shot") val oneShot: Boolean = false,
+    @SerialName("slot_name") val slotName: String? = null,
+    @SerialName("system_size_bytes") val systemSizeBytes: Long = 0L,
+    @SerialName("userdata_size_bytes") val userdataSizeBytes: Long = 0L,
+    @SerialName("total_disk_bytes") val totalDiskBytes: Long = 0L,
+    @SerialName("avb_pubkey_sha1") val avbPubkeySha1: String? = null,
+    @SerialName("raw_status") val rawStatus: String = "unknown",
+)
+
+data class LocalGsiImage(
+    val name: String,
+    val path: String,
+    val sizeBytes: Long,
+    val lastModified: Long,
+)
+
 data class CoreProgress(
     val stage: String,
     val current: Long,
