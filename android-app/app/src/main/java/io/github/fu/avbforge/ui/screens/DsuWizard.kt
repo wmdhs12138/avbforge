@@ -35,6 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -108,6 +109,7 @@ fun DsuWizard(
         if (uri != null) {
             UriPathResolver.resolveFileUri(ctx, uri)?.let {
                 gsiInputPath = it
+                vm.clearLastGsiReport()
                 onNotify("已选择 GSI：${File(it).name}")
             }
         }
@@ -315,18 +317,46 @@ fun DsuWizard(
                         modifier = Modifier.fillMaxWidth(),
                     )
 
+                    val isRawImg = gsiInputPath.endsWith(".img", ignoreCase = true)
+                    if (isRawImg) {
+                        OutlinedButton(
+                            onClick = { vm.verifyExistingSignedGsi(gsiInputPath.trim()) },
+                            enabled = !state.busy && defaultKey != null,
+                            shape = CircleShape,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Text(
+                                text = "已是本机密钥签过的镜像：仅验签并跳过重签",
+                                modifier = Modifier.padding(start = 8.dp, top = 6.dp, bottom = 6.dp),
+                            )
+                        }
+                    }
+
                     state.lastGsiReport?.let { rep ->
                         WizardCalloutCard(
-                            title = "GSI 自签名与全树校验通过！",
+                            title = if (rep.rootDigest == "verified-existing-image") {
+                                "已有自签名镜像验签通过（已跳过重签）！"
+                            } else {
+                                "GSI 自签名与全树校验通过！"
+                            },
                             icon = Icons.Rounded.CheckCircle,
                             containerColor = MaterialTheme.colorScheme.secondaryContainer,
                             contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            bullets = listOf(
-                                "原始镜像：${formatByteSize(rep.originalSize)} → 签后体积：${formatByteSize(rep.finalSize)}",
-                                "Hashtree 大小：${formatByteSize(rep.treeSize)}",
-                                "Root Digest：${rep.rootDigest.take(28)}...",
-                                "输出文件：${rep.outputPath}",
-                            ),
+                            bullets = if (rep.rootDigest == "verified-existing-image") {
+                                listOf(
+                                    "镜像体积：${formatByteSize(rep.finalSize)}",
+                                    "签名密钥匹配本机默认私钥，无需重复签名",
+                                    "镜像路径：${rep.outputPath}",
+                                )
+                            } else {
+                                listOf(
+                                    "原始镜像：${formatByteSize(rep.originalSize)} → 签后体积：${formatByteSize(rep.finalSize)}",
+                                    "Hashtree 大小：${formatByteSize(rep.treeSize)}",
+                                    "Root Digest：${rep.rootDigest.take(28)}...",
+                                    "输出文件：${rep.outputPath}",
+                                )
+                            },
                         )
                     }
                 }

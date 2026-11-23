@@ -360,6 +360,66 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun clearLastGsiReport() {
+        _state.update { it.copy(lastGsiReport = null) }
+    }
+
+    /**
+     * Fast path for an already self-signed GSI `.img`: verify its AVB signature & Merkle hashtree
+     * against the default key without re-compressing or re-signing.
+     */
+    fun verifyExistingSignedGsi(imagePath: String) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "请先在「工具 → 密钥库」导入与本机一致的默认 AVB 密钥") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    busy = true,
+                    statusMessage = "正在校验已签名 GSI 的 AVB 签名与 Hashtree...",
+                    errorBanner = null,
+                )
+            }
+            val res = runner.run(
+                args = listOf(
+                    "avb", "verify",
+                    "--image", imagePath,
+                    "--expected-pubkey", vault.pkmdFile(key.id).absolutePath,
+                ),
+                requireRoot = false,
+                timeoutSeconds = 600,
+                onLog = ::appendLog,
+            )
+            res.onSuccess {
+                val sz = runCatching { File(imagePath).length() }.getOrDefault(0L)
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        lastGsiReport = GsiSignReport(
+                            outputPath = imagePath,
+                            originalSize = sz,
+                            finalSize = sz,
+                            treeSize = 0L,
+                            rootDigest = "verified-existing-image",
+                            pubkeySha1 = key.sha1,
+                        ),
+                        statusMessage = "验签通过！已跳过重复签名，可直接进入下一步安装 DSU。",
+                    )
+                }
+            }.onFailure { err ->
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        errorBanner = "该镜像未通过当前默认密钥验签（可能尚未自签名或使用了其他密钥），请点击「开始计算 Hashtree 并签名验签」重新签名。详情：${err.message}",
+                    )
+                }
+            }
+        }
+    }
+
     fun signGsiImage(inputPath: String) {
         val key = vault.getDefaultKey() ?: run {
             _state.update { it.copy(errorBanner = "请先在「密钥」页生成或导入默认 AVB 密钥") }
