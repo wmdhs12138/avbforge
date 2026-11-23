@@ -215,12 +215,18 @@ fun WizardScaffold(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        val p = state.progress
+                        val stageDetail = when {
+                            p == null -> ""
+                            p.total > 0 -> " (${(p.current * 100 / p.total).coerceIn(0, 100)}%)"
+                            p.stage == "decompress" && p.current > 0 -> " · 已解压 ${formatByteSize(p.current)}"
+                            else -> ""
+                        }
                         Text(
-                            text = state.statusMessage,
+                            text = state.statusMessage + stageDetail,
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
-                        val p = state.progress
                         if (p != null && p.total > 0) {
                             val anim by animateFloatAsState(
                                 targetValue = (p.current.toFloat() / p.total.toFloat()).coerceIn(0f, 1f),

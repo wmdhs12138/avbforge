@@ -53,9 +53,9 @@ pub fn decompress_ramdisk(data: &[u8]) -> Result<(CompressionFormat, Vec<u8>)> {
             buf
         }
         CompressionFormat::Xz => {
-            let mut br = BufReader::new(data);
+            let mut dec = lzma_rust2::XzReader::new(BufReader::new(data), true);
             let mut buf = Vec::new();
-            lzma_rs::xz_decompress(&mut br, &mut buf).context("XZ decompression failed")?;
+            dec.read_to_end(&mut buf).context("XZ decompression failed")?;
             buf
         }
     };
@@ -168,36 +168,26 @@ where
             }
         }
         CompressionFormat::Xz => {
-            let mut br = BufReader::new(src);
-            // Stream-decompress xz via counting writer
-            struct CountingWriter<'a, W: Write, F: FnMut(u64)> {
-                inner: &'a mut W,
-                written: u64,
-                last_report: u64,
-                cb: F,
-            }
-            impl<W: Write, F: FnMut(u64)> Write for CountingWriter<'_, W, F> {
-                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                    let k = self.inner.write(buf)?;
-                    self.written += k as u64;
-                    if self.written - self.last_report >= 8 * 1024 * 1024 {
-                        self.last_report = self.written;
-                        (self.cb)(self.written);
-                    }
-                    Ok(k)
+            let mut dec = lzma_rust2::XzReader::new(BufReader::with_capacity(1024 * 1024, src), true);
+            let mut last_report = 0u64;
+            loop {
+                let k = dec.read(&mut buf).with_context(|| {
+                    format!(
+                        "XZ 解压失败（已解压 {:.1} MiB）：压缩包可能下载损坏，请重新下载并核对校验和",
+                        written as f64 / (1024.0 * 1024.0)
+                    )
+                })?;
+                if k == 0 {
+                    break;
                 }
-                fn flush(&mut self) -> std::io::Result<()> {
-                    self.inner.flush()
+                dst.write_all(&buf[..k])?;
+                written += k as u64;
+                if written - last_report >= 8 * 1024 * 1024 {
+                    last_report = written;
+                    progress_cb(written);
                 }
             }
-            let mut cw = CountingWriter {
-                inner: &mut dst,
-                written: 0,
-                last_report: 0,
-                cb: progress_cb,
-            };
-            lzma_rs::xz_decompress(&mut br, &mut cw).context("XZ stream decompression failed")?;
-            (cw.cb)(cw.written);
+            progress_cb(written);
         }
         CompressionFormat::Lz4Legacy => {
             let raw = std::fs::read(src_path)?;
@@ -234,5 +224,35 @@ mod tests {
         let (fmt, dec) = decompress_ramdisk(&comp).unwrap();
         assert_eq!(fmt, CompressionFormat::Lz4Legacy);
         assert_eq!(dec, sample);
+    }
+
+    #[test]
+    fn xz_crc64_stream_decompress_and_corrupt_check() {
+        let fixture: [u8; 140] = [
+            253, 55, 122, 88, 90, 0, 0, 4, 230, 214, 180, 70, 2, 0, 33, 1, 22, 0, 0, 0, 116, 47,
+            229, 163, 224, 66, 103, 0, 74, 93, 0, 32, 149, 132, 70, 189, 246, 38, 157, 69, 13, 164,
+            114, 38, 153, 254, 121, 28, 150, 210, 251, 237, 131, 25, 157, 94, 67, 180, 84, 226,
+            249, 16, 117, 27, 167, 199, 48, 12, 26, 94, 119, 44, 183, 207, 139, 90, 229, 238, 32,
+            209, 19, 116, 199, 141, 219, 207, 133, 150, 44, 164, 2, 35, 8, 22, 58, 216, 30, 171,
+            83, 49, 22, 36, 230, 167, 0, 0, 0, 0, 163, 219, 104, 40, 116, 90, 38, 163, 0, 1, 102,
+            232, 132, 1, 0, 0, 223, 255, 165, 102, 177, 196, 103, 251, 2, 0, 0, 0, 0, 4, 89, 90,
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("sample.xz");
+        let dst = tmp.path().join("sample.raw");
+        std::fs::write(&src, fixture).unwrap();
+
+        let mut reported = 0u64;
+        let fmt = stream_decompress_file(&src, &dst, |n| reported = n).unwrap();
+        assert_eq!(fmt, CompressionFormat::Xz);
+        let expected = b"AVBForge XZ test ".repeat(1000);
+        assert_eq!(std::fs::read(&dst).unwrap(), expected);
+        assert_eq!(reported, expected.len() as u64);
+
+        // Corrupt 1 byte inside compressed payload and confirm detection
+        let mut bad = fixture;
+        bad[50] ^= 0xff;
+        std::fs::write(&src, bad).unwrap();
+        assert!(stream_decompress_file(&src, &dst, |_| {}).is_err());
     }
 }

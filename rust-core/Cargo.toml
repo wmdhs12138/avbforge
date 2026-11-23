@@ -24,7 +24,7 @@ rand = "0.8"
 rayon = "1.10"
 lz4_flex = "0.11"
 flate2 = "1.0"
-lzma-rs = "0.3"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "optimization", "xz"] }
 clap = { version = "4.5", features = ["derive"] }
 tempfile = "3.14"
 
