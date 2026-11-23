@@ -1,5 +1,9 @@
 package io.github.fu.avbforge.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Environment
+import android.provider.Settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
@@ -30,6 +35,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +49,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.fu.avbforge.core.FreezerDetector
 import io.github.fu.avbforge.core.SafetyGate
 import io.github.fu.avbforge.ui.AvbForgeViewModel
@@ -71,7 +84,21 @@ fun HomeHubScreen(
     onOpenWizard: (ActiveWizard) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val snap = state.snapshot
+
+    var hasAllFilesAccess by remember {
+        mutableStateOf(Environment.isExternalStorageManager())
+    }
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasAllFilesAccess = Environment.isExternalStorageManager()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     val vbs = snap?.verifiedBootState?.lowercase().orEmpty()
     val isYellow = vbs == "yellow"
@@ -300,6 +327,31 @@ fun HomeHubScreen(
         }
 
         // 2. Contextual Alerts (ONLY when abnormal)
+        if (!hasAllFilesAccess) {
+            M3EGroupRow(
+                title = "请授予「所有文件访问权限」",
+                subtitle = "用于直接读写 Download 中的私钥、分区备份和大体积 GSI 镜像；点击一键前往授权。",
+                icon = Icons.Rounded.FolderOpen,
+                iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                iconBg = MaterialTheme.colorScheme.primaryContainer,
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                showChevron = true,
+                onClick = {
+                    val pkgIntent = Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:${ctx.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { ctx.startActivity(pkgIntent) }.onFailure {
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                },
+            )
+        }
         if (snap != null && !isNeo9) {
             M3EGroupRow(
                 title = "非 iQOO Neo9 机型警示",

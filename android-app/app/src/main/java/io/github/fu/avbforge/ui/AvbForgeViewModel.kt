@@ -219,6 +219,11 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 tmpPkmd.delete()
+                val pickedDir = File(getApplication<Application>().cacheDir, "picked")
+                val pemFile = File(pemPath)
+                if (pemFile.parentFile == pickedDir) {
+                    runCatching { pemFile.delete() }
+                }
             }
         }
     }
