@@ -232,6 +232,8 @@ enum GsiAction {
         passphrase: Option<String>,
         #[arg(long)]
         partition_size: Option<u64>,
+        #[arg(long)]
+        security_patch: Option<String>,
     },
 }
 
@@ -518,9 +520,16 @@ fn run(cli: Cli) -> Result<()> {
                 key,
                 passphrase,
                 partition_size,
+                security_patch,
             } => {
-                let rep =
-                    forge::sign_gsi(&input, &output, &key, passphrase.as_deref(), partition_size)?;
+                let rep = forge::sign_gsi(
+                    &input,
+                    &output,
+                    &key,
+                    passphrase.as_deref(),
+                    partition_size,
+                    security_patch.as_deref(),
+                )?;
                 emit_result(rep);
             }
         },

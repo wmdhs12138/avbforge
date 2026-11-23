@@ -352,12 +352,15 @@ fn resign_hash_partition(
 }
 
 /// Decompress (if .xz/.gz), unsparse (if sparse), strip old footer, and sign a GSI with AVB hashtree footer.
+/// Automatically injects `com.android.build.system.security_patch` (>= host SPL) so locked Yellow
+/// devices pass AOSP `IsStandaloneImageRollback()` during `first_stage_mount`!
 pub fn sign_gsi(
     input_path: &Path,
     output_path: &Path,
     key_pem: &Path,
     passphrase: Option<&str>,
     partition_size: Option<u64>,
+    security_patch_override: Option<&str>,
 ) -> Result<GsiSignReport> {
     let priv_key = AvbPrivateKey::from_pem_file(key_pem, passphrase)?;
     let pub_key = priv_key.public_key()?;
@@ -387,10 +390,53 @@ pub fn sign_gsi(
         fs::rename(&raw_img, &work_img)?;
     }
 
-    // Step 3: erase any pre-existing AVB footer
+    // Step 3: preserve useful AVB properties (especially security_patch) before erasing old footer
+    let mut orig_spl: Option<String> = None;
+    let mut orig_os_ver: Option<String> = None;
+    if let Ok(loaded) = load_avb_image(&work_img) {
+        for d in &loaded.vbmeta.descriptors {
+            if let AvbDescriptor::Property(p) = d {
+                if p.key == "com.android.build.system.security_patch" && !p.value.is_empty() {
+                    orig_spl = Some(p.value.clone());
+                } else if p.key == "com.android.build.system.os_version" && !p.value.is_empty() {
+                    orig_os_ver = Some(p.value.clone());
+                }
+            }
+        }
+    }
+
     if erase_footer(&work_img)? {
         emit_log("info", "Stripped pre-existing AVB footer from GSI.");
     }
+
+    // Compute a safe security_patch >= host SPL so locked Yellow devices never fail IsStandaloneImageRollback()
+    let host_spl = crate::device::getprop("ro.build.version.security_patch");
+    let effective_spl = if let Some(ov) = security_patch_override.filter(|s| !s.is_empty()) {
+        ov.to_string()
+    } else {
+        let mut best = "2026-11-05".to_string();
+        if !host_spl.is_empty() && host_spl > best {
+            best = host_spl.clone();
+        }
+        if let Some(ref s) = orig_spl {
+            if *s > best {
+                best = s.clone();
+            }
+        }
+        best
+    };
+
+    let mut props = vec![(
+        "com.android.build.system.security_patch".to_string(),
+        effective_spl.clone(),
+    )];
+    if let Some(osv) = orig_os_ver {
+        props.push(("com.android.build.system.os_version".to_string(), osv));
+    }
+    emit_log(
+        "info",
+        &format!("Embedding AVB security_patch={effective_spl} (host={host_spl}) for locked DSU anti-rollback check."),
+    );
 
     // Step 4: compute Merkle hashtree & sign
     emit_log("info", &format!("Computing SHA-256 hashtree & signing ({})...", alg.as_str()));
@@ -404,7 +450,7 @@ pub fn sign_gsi(
             salt: None,
             rollback_index: 0,
             flags: 0,
-            props: vec![],
+            props,
             release_string: None,
             block_size: 4096,
         },
