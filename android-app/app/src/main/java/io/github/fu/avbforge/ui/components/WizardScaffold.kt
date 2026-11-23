@@ -218,6 +218,7 @@ fun WizardScaffold(
                         val p = state.progress
                         val stageDetail = when {
                             p == null -> ""
+                            p.stage == "stage" && p.total > 0 -> " · 暂存至 /data/gsi (${(p.current * 100 / p.total).coerceIn(0, 100)}%)"
                             p.total > 0 -> " (${(p.current * 100 / p.total).coerceIn(0, 100)}%)"
                             p.stage == "decompress" && p.current > 0 -> " · 已解压 ${formatByteSize(p.current)}"
                             else -> ""

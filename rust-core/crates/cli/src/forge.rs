@@ -9,6 +9,7 @@ use bootimg::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -430,6 +431,15 @@ pub fn sign_gsi(
     })
 }
 
+struct TempFileGuard(Option<PathBuf>);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 pub fn dsu_install(
     signed_gsi_path: &Path,
     userdata_size_bytes: u64,
@@ -442,7 +452,47 @@ pub fn dsu_install(
             .context("Refusing DSU install: GSI failed AVB verification against selected key")?;
     }
     let gsi_size = fs::metadata(signed_gsi_path)?.len();
-    let img_file = fs::File::open(signed_gsi_path)?;
+
+    // Clean up any stale/partial previous DSU state before installing
+    let _ = Command::new("/system/bin/gsi_tool").arg("wipe").output();
+
+    // Android's gsid SELinux policy denies reading FUSE (/storage/emulated/0) files directly,
+    // while explicitly allowing gsi_data_file under /data/gsi/. Stage into /data/gsi/ and
+    // auto-clean via TempFileGuard so gsid reads a properly-labeled gsi_data_file descriptor.
+    let mut stage_guard = TempFileGuard(None);
+    let feed_path: PathBuf = if signed_gsi_path.starts_with("/data/gsi") {
+        signed_gsi_path.to_path_buf()
+    } else if Path::new("/data/gsi").is_dir() {
+        let staged = PathBuf::from(format!("/data/gsi/.avbforge_stage_{}.img", std::process::id()));
+        emit_log(
+            "info",
+            &format!("Staging signed GSI into /data/gsi/ for gsid ({gsi_size} B)..."),
+        );
+        stage_guard.0 = Some(staged.clone());
+        let mut src = fs::File::open(signed_gsi_path)?;
+        let mut dst = fs::File::create(&staged)?;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut copied = 0u64;
+        let mut last_rep = 0u64;
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n])?;
+            copied += n as u64;
+            if copied - last_rep >= 32 * 1024 * 1024 || copied == gsi_size {
+                last_rep = copied;
+                emit_progress("stage", copied, gsi_size);
+            }
+        }
+        dst.sync_all()?;
+        staged
+    } else {
+        signed_gsi_path.to_path_buf()
+    };
+
+    let img_file = fs::File::open(&feed_path)?;
     emit_log(
         "info",
         &format!("Installing DSU via gsi_tool (gsi={gsi_size} B, userdata={userdata_size_bytes} B)..."),
@@ -460,10 +510,15 @@ pub fn dsu_install(
         .stdin(Stdio::from(img_file))
         .output()
         .context("Failed to execute /system/bin/gsi_tool")?;
+    drop(stage_guard);
+
     if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         bail!(
-            "gsi_tool install failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            "gsi_tool install failed: {}{}",
+            stderr,
+            if stdout.is_empty() { String::new() } else { format!(" | {stdout}") }
         );
     }
 

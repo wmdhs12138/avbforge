@@ -417,18 +417,25 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             if (key != null) {
                 args += listOf("--expected-pubkey", vault.pkmdFile(key.id).absolutePath)
             }
-            val res = runner.run(args = args, requireRoot = true, timeoutSeconds = 1800, onLog = ::appendLog)
+            val res = runner.run(
+                args = args,
+                requireRoot = true,
+                timeoutSeconds = 1800,
+                onLog = ::appendLog,
+                onProgress = { p -> _state.update { it.copy(progress = p) } },
+            )
             res.onSuccess { elem ->
                 val st = elem.jsonObject["status"]?.jsonPrimitive?.content ?: "installed"
                 _state.update {
                     it.copy(
                         busy = false,
+                        progress = null,
                         dsuStatusText = st,
                         statusMessage = "DSU 安装就绪（单次启动=${singleBoot}），现在重启即可进入 GSI！",
                     )
                 }
             }.onFailure { err ->
-                _state.update { it.copy(busy = false, errorBanner = "DSU 安装失败：${err.message}") }
+                _state.update { it.copy(busy = false, progress = null, errorBanner = "DSU 安装失败：${err.message}") }
             }
         }
     }
