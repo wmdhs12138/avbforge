@@ -46,7 +46,19 @@ pub struct GsiSignReport {
     pub pubkey_sha1: String,
 }
 
-/// Inject an AVB public key into `init_boot` (or `boot`) ramdisk and re-sign preserving original AVB metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportCleanInitBootReport {
+    pub output_path: String,
+    pub backup_path: Option<String>,
+    pub size: u64,
+    pub sha256: String,
+    pub had_kernelsu: bool,
+    pub stripped_kernelsu: bool,
+    pub existing_dsu_keys: Vec<String>,
+}
+
+/// Inject an AVB public key (optional when `inject_dsu_key == false`) into `init_boot` (or `boot`) ramdisk and re-sign preserving original AVB metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn patch_dsu_key(
     input_img: &Path,
     output_img: &Path,
@@ -55,6 +67,7 @@ pub fn patch_dsu_key(
     partition_name: &str,
     target_key_name: &str,
     metadata_source_img: Option<&Path>,
+    inject_dsu_key: bool,
 ) -> Result<PatchDsuKeyReport> {
     let priv_key = AvbPrivateKey::from_pem_file(key_pem, passphrase)?;
     let pub_key = priv_key.public_key()?;
@@ -96,14 +109,21 @@ pub fn patch_dsu_key(
     let boot = BootImageV3V4::parse(raw_slice)?;
     let (fmt, mut cpio) = boot.unpack_ramdisk()?;
 
-    // Inject into both `first_stage_ramdisk/avb/<name>` and `avb/<name>` (covers force_normal_boot & direct rootfs)
-    let key_basename = target_key_name.trim_start_matches('/').trim_start_matches("avb/");
-    let path1 = format!("first_stage_ramdisk/avb/{key_basename}");
-    let path2 = format!("avb/{key_basename}");
-    cpio.upsert_file(&path1, 0o100644, pub_key.raw_avb_key.clone());
-    cpio.upsert_file(&path2, 0o100644, pub_key.raw_avb_key.clone());
+    let mut injected_paths = Vec::new();
+    let repacked = if inject_dsu_key {
+        // Inject into both `first_stage_ramdisk/avb/<name>` and `avb/<name>` (covers force_normal_boot & direct rootfs)
+        let key_basename = target_key_name.trim_start_matches('/').trim_start_matches("avb/");
+        let path1 = format!("first_stage_ramdisk/avb/{key_basename}");
+        let path2 = format!("avb/{key_basename}");
+        cpio.upsert_file(&path1, 0o100644, pub_key.raw_avb_key.clone());
+        cpio.upsert_file(&path2, 0o100644, pub_key.raw_avb_key.clone());
+        injected_paths.push(path1);
+        injected_paths.push(path2);
+        boot.repack_with_ramdisk(fmt, &cpio)?
+    } else {
+        raw_slice.to_vec()
+    };
 
-    let repacked = boot.repack_with_ramdisk(fmt, &cpio)?;
     if let Some(parent) = output_img.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -135,11 +155,13 @@ pub fn patch_dsu_key(
     let raw_out = &out_bytes[..loaded_out.footer.unwrap().original_image_size as usize];
     let re_boot = BootImageV3V4::parse(raw_out)?;
     let re_info = re_boot.inspect()?;
-    let (_, re_cpio) = re_boot.unpack_ramdisk()?;
-    if re_cpio.get(&path1).map(|e| e.data.as_slice()) != Some(pub_key.raw_avb_key.as_slice())
-        || re_cpio.get(&path2).map(|e| e.data.as_slice()) != Some(pub_key.raw_avb_key.as_slice())
-    {
-        bail!("Round-trip verification failed: injected avbpubkey mismatch");
+    if inject_dsu_key {
+        let (_, re_cpio) = re_boot.unpack_ramdisk()?;
+        for p in &injected_paths {
+            if re_cpio.get(p).map(|e| e.data.as_slice()) != Some(pub_key.raw_avb_key.as_slice()) {
+                bail!("Round-trip verification failed: injected avbpubkey mismatch at {p}");
+            }
+        }
     }
 
     fs::copy(&staged, output_img)?;
@@ -150,7 +172,7 @@ pub fn patch_dsu_key(
         size: out_bytes.len() as u64,
         sha256,
         ramdisk_compression: fmt,
-        injected_paths: vec![path1, path2],
+        injected_paths,
         has_kernelsu: re_info.has_kernelsu,
         avb_pubkey_sha1: pub_key.sha1_hex(),
     })
@@ -205,6 +227,7 @@ pub fn forge_bundle(
                     "init_boot",
                     dsu_key_name,
                     Some(&stock_img),
+                    true,
                 )?;
                 init_boot_has_ksu = rep.has_kernelsu;
             } else {
@@ -490,4 +513,80 @@ pub fn export_stock_init_boot(output_path: &Path, slot_override: Option<&str>) -
     let sz = crate::device::blockdev_size(&dev)?;
     crate::device::copy_block_head(&dev, output_path, sz)?;
     Ok(output_path.to_path_buf())
+}
+
+/// Export active/specified slot `init_boot.img`, optionally saving a raw backup first and stripping
+/// any pre-existing KernelSU LKM patch (`init.real -> init`, removing `kernelsu.ko` & `ksu_config`)
+/// so the exported image is a clean stock base safe to feed into ANY KernelSU manager.
+pub fn export_clean_init_boot(
+    output_path: &Path,
+    slot_override: Option<&str>,
+    strip_ksu: bool,
+    raw_backup_output: Option<&Path>,
+) -> Result<ExportCleanInitBootReport> {
+    let tmp_dir = tempfile::tempdir()?;
+    let raw_dump = tmp_dir.path().join("init_boot_live.img");
+    export_stock_init_boot(&raw_dump, slot_override)?;
+
+    let backup_path_str = if let Some(bkp) = raw_backup_output {
+        if let Some(parent) = bkp.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&raw_dump, bkp)?;
+        emit_log("info", &format!("Saved raw live init_boot backup to {}", bkp.display()));
+        Some(bkp.display().to_string())
+    } else {
+        None
+    };
+
+    let raw_bytes = fs::read(&raw_dump)?;
+    let raw_slice = match load_avb_image(&raw_dump) {
+        Ok(loaded) => match loaded.footer {
+            Some(f) => &raw_bytes[..f.original_image_size as usize],
+            None => &raw_bytes[..],
+        },
+        Err(_) => &raw_bytes[..],
+    };
+
+    let boot = BootImageV3V4::parse(raw_slice)?;
+    let info = boot.inspect()?;
+    let had_kernelsu = info.has_kernelsu;
+    let existing_dsu_keys = info.avbpubkey_entries;
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let stripped_kernelsu = if had_kernelsu && strip_ksu {
+        emit_log(
+            "info",
+            "Detected existing KernelSU LKM in init_boot; stripping to clean stock init_boot...",
+        );
+        let (fmt, mut cpio) = boot.unpack_ramdisk()?;
+        let stripped = cpio.strip_kernelsu();
+        let repacked = boot.repack_with_ramdisk(fmt, &cpio)?;
+        // Verify repacked image is valid and KSU-free
+        let verify_boot = BootImageV3V4::parse(&repacked)?;
+        let verify_info = verify_boot.inspect()?;
+        if verify_info.has_kernelsu {
+            bail!("Failed to strip KernelSU completely from init_boot ramdisk");
+        }
+        fs::write(output_path, &repacked)?;
+        stripped
+    } else {
+        fs::copy(&raw_dump, output_path)?;
+        false
+    };
+
+    let size = fs::metadata(output_path)?.len();
+    let sha256 = sha256_file(output_path)?;
+    Ok(ExportCleanInitBootReport {
+        output_path: output_path.display().to_string(),
+        backup_path: backup_path_str,
+        size,
+        sha256,
+        had_kernelsu,
+        stripped_kernelsu,
+        existing_dsu_keys,
+    })
 }

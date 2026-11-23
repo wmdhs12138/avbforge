@@ -629,15 +629,15 @@ fun M3EFloatingNavBar(
                     ) {
                         Row(
                             modifier = Modifier.padding(
-                                horizontal = if (selected) 18.dp else 14.dp,
+                                horizontal = if (selected || items.size <= 3) 20.dp else 14.dp,
                                 vertical = 10.dp,
                             ),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Icon(item.icon, contentDescription = item.label, tint = fg, modifier = Modifier.size(21.dp))
                             AnimatedVisibility(
-                                visible = selected,
+                                visible = selected || items.size <= 3,
                                 enter = expandHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(180)),
                                 exit = shrinkHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut(tween(120)),
                             ) {

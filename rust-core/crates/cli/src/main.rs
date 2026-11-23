@@ -54,7 +54,18 @@ enum Commands {
         #[arg(long)]
         slot: Option<String>,
     },
-    /// Inject DSU avbpubkey into init_boot/boot ramdisk and re-sign
+    /// Export clean stock init_boot.img (automatically backs up live image & strips existing KSU LKM if requested)
+    ExportCleanInitBoot {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        slot: Option<String>,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        strip_ksu: bool,
+        #[arg(long)]
+        raw_backup_output: Option<PathBuf>,
+    },
+    /// Inject DSU avbpubkey (optional) into init_boot/boot ramdisk and re-sign preserving original AVB metadata
     PatchDsuKey {
         #[arg(long)]
         input: PathBuf,
@@ -70,6 +81,8 @@ enum Commands {
         target_key_name: String,
         #[arg(long)]
         metadata_source: Option<PathBuf>,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        inject_dsu_key: bool,
     },
     /// Forge a complete self-signed bundle (optional user KSU init_boot + optional DSU pubkey)
     ForgeBundle {
@@ -420,6 +433,20 @@ fn run(cli: Cli) -> Result<()> {
             let p = forge::export_stock_init_boot(&output, slot.as_deref())?;
             emit_result(json!({ "output": p, "sha256": device::sha256_file(&p)? }));
         }
+        Commands::ExportCleanInitBoot {
+            output,
+            slot,
+            strip_ksu,
+            raw_backup_output,
+        } => {
+            let rep = forge::export_clean_init_boot(
+                &output,
+                slot.as_deref(),
+                strip_ksu,
+                raw_backup_output.as_deref(),
+            )?;
+            emit_result(rep);
+        }
         Commands::PatchDsuKey {
             input,
             output,
@@ -428,6 +455,7 @@ fn run(cli: Cli) -> Result<()> {
             partition_name,
             target_key_name,
             metadata_source,
+            inject_dsu_key,
         } => {
             let rep = forge::patch_dsu_key(
                 &input,
@@ -437,6 +465,7 @@ fn run(cli: Cli) -> Result<()> {
                 &partition_name,
                 &target_key_name,
                 metadata_source.as_deref(),
+                inject_dsu_key,
             )?;
             emit_result(rep);
         }

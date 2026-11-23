@@ -76,6 +76,17 @@ data class PatchDsuKeyReport(
 )
 
 @Serializable
+data class ExportCleanInitBootReport(
+    @SerialName("output_path") val outputPath: String,
+    @SerialName("backup_path") val backupPath: String? = null,
+    val size: Long,
+    val sha256: String,
+    @SerialName("had_kernelsu") val hadKernelsu: Boolean = false,
+    @SerialName("stripped_kernelsu") val strippedKernelsu: Boolean = false,
+    @SerialName("existing_dsu_keys") val existingDsuKeys: List<String> = emptyList(),
+)
+
+@Serializable
 data class ForgeBundleReport(
     @SerialName("output_dir") val outputDir: String,
     @SerialName("signed_partitions") val signedPartitions: List<String>,

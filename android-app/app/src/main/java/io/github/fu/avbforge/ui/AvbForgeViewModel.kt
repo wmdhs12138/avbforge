@@ -11,6 +11,7 @@ import io.github.fu.avbforge.core.SafetyGate
 import io.github.fu.avbforge.data.BackupManifest
 import io.github.fu.avbforge.data.CoreProgress
 import io.github.fu.avbforge.data.DeviceSnapshot
+import io.github.fu.avbforge.data.ExportCleanInitBootReport
 import io.github.fu.avbforge.data.ForgeBundleReport
 import io.github.fu.avbforge.data.GsiSignReport
 import io.github.fu.avbforge.data.KeyEntry
@@ -35,6 +36,8 @@ data class UiState(
     val lastBackup: BackupManifest? = null,
     val lastBackupDir: String? = null,
     val exportedInitBootPath: String? = null,
+    val cleanInitBootReport: ExportCleanInitBootReport? = null,
+    val lastKsuUpdateReport: PatchDsuKeyReport? = null,
     val lastForgeReport: ForgeBundleReport? = null,
     val lastDsuPatchReport: PatchDsuKeyReport? = null,
     val lastGsiReport: GsiSignReport? = null,
@@ -503,13 +506,135 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun exportCleanInitBootForKsu(stripKsu: Boolean = true) {
+        viewModelScope.launch {
+            val ts = System.currentTimeMillis() / 1000
+            val backupFile = File(baseWorkDir, "init_boot_live_backup_$ts.img")
+            val cleanFile = File(baseWorkDir, "init_boot_clean_for_ksu_$ts.img")
+            _state.update {
+                it.copy(
+                    busy = true,
+                    statusMessage = "正在备份当前 init_boot 并导出纯净底包...",
+                    errorBanner = null,
+                )
+            }
+            val res = runner.run(
+                args = listOf(
+                    "export-clean-init-boot",
+                    "--output", cleanFile.absolutePath,
+                    "--strip-ksu", stripKsu.toString(),
+                    "--raw-backup-output", backupFile.absolutePath,
+                ),
+                requireRoot = true,
+                onLog = ::appendLog,
+            )
+            res.onSuccess { elem ->
+                val rep = runner.json.decodeFromJsonElement<ExportCleanInitBootReport>(elem)
+                val msg = if (rep.strippedKernelsu) {
+                    "已自动剥离旧版 KernelSU 并导出纯净底包：${File(rep.outputPath).name}"
+                } else {
+                    "已导出纯净 init_boot：${File(rep.outputPath).name}"
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        cleanInitBootReport = rep,
+                        exportedInitBootPath = rep.outputPath,
+                        statusMessage = msg,
+                    )
+                }
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "导出纯净 init_boot 失败：${err.message}") }
+            }
+        }
+    }
+
+    fun prepareUpdatedKsuInitBoot(
+        patchedImgPath: String,
+        preserveDsuKey: Boolean,
+        dsuKeyName: String,
+    ) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "请先在「工具 → 密钥库」导入与本机一致的默认 AVB 密钥") }
+            return
+        }
+        viewModelScope.launch {
+            val ts = System.currentTimeMillis() / 1000
+            val outFile = File(baseWorkDir, "init_boot_ksu_signed_$ts.img")
+            _state.update {
+                it.copy(
+                    busy = true,
+                    statusMessage = "正在重签 KSU init_boot 并执行离线验签...",
+                    errorBanner = null,
+                )
+            }
+
+            // Ensure we have live init_boot metadata source (partition_size, rollback_index, props)
+            var metaSource = _state.value.cleanInitBootReport?.backupPath?.takeIf { File(it).exists() }
+            if (metaSource == null) {
+                val tmpMeta = File(baseWorkDir, "init_boot_meta_backup_$ts.img")
+                val exp = runner.run(
+                    args = listOf("export-init-boot", "--output", tmpMeta.absolutePath),
+                    requireRoot = true,
+                    onLog = ::appendLog,
+                )
+                if (exp.isSuccess) {
+                    metaSource = tmpMeta.absolutePath
+                }
+            }
+
+            runCatching {
+                vault.withTempPlaintextKey(key.id) { pemFile, _ ->
+                    val args = mutableListOf(
+                        "patch-dsu-key",
+                        "--input", patchedImgPath,
+                        "--output", outFile.absolutePath,
+                        "--key", pemFile.absolutePath,
+                        "--partition-name", "init_boot",
+                        "--inject-dsu-key", preserveDsuKey.toString(),
+                        "--target-key-name", dsuKeyName.ifBlank { "q-gsi.avbpubkey" },
+                    )
+                    if (!metaSource.isNullOrBlank()) {
+                        args += listOf("--metadata-source", metaSource)
+                    }
+                    runner.run(args = args, requireRoot = false, onLog = ::appendLog)
+                }
+            }.onSuccess { res ->
+                res.onSuccess { elem ->
+                    val rep = runner.json.decodeFromJsonElement<PatchDsuKeyReport>(elem)
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            lastKsuUpdateReport = rep,
+                            statusMessage = "KSU init_boot 自签名并验签通过（KSU=${rep.hasKernelsu}，DSU公钥=${rep.injectedPaths.isNotEmpty()}）",
+                        )
+                    }
+                }.onFailure { err ->
+                    _state.update { it.copy(busy = false, errorBanner = "重签/验签失败：${err.message}") }
+                }
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "读取私钥失败：${err.message}") }
+            }
+        }
+    }
+
     fun flashPreparedDsuInitBoot(imagePath: String) {
+        flashSingleInitBoot(
+            imagePath = imagePath,
+            successMessage = "DSU init_boot 写入并回读验签通过！重启一次手机后即可使用 DSU。",
+        )
+    }
+
+    fun flashSingleInitBoot(
+        imagePath: String,
+        successMessage: String = "init_boot 写入并回读验签通过！现在重启手机即可生效（不会清空数据）。",
+    ) {
         val key = vault.getDefaultKey() ?: run {
             _state.update { it.copy(errorBanner = "未找到默认密钥") }
             return
         }
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, statusMessage = "正在写入 DSU init_boot 并回读校验...", errorBanner = null) }
+            _state.update { it.copy(busy = true, statusMessage = "正在写入活动槽位 init_boot 并清缓存回读校验...", errorBanner = null) }
             val res = runner.run(
                 args = listOf(
                     "flash-partition",
@@ -526,7 +651,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         busy = false,
                         progress = null,
-                        statusMessage = "DSU init_boot 写入并回读验签通过！重启一次手机后即可使用 DSU。",
+                        statusMessage = successMessage,
                     )
                 }
                 refreshDevice()

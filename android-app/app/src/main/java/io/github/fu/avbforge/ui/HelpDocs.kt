@@ -141,4 +141,25 @@ object HelpDocs {
         ),
         caution = "前提：设备必须已经处于 Yellow 自签名状态，且密钥库里的默认私钥与本机 vbmeta 公钥一致。",
     )
+
+    val KSU_UPDATE_NO_DIRECT = HelpDoc(
+        title = "为什么回锁机严禁使用 KSU 管理器「直接安装」？",
+        summary = "KernelSU 管理器的「直接安装」会直接向 init_boot 分区写入未签名镜像，导致 AVB 校验失败。",
+        bullets = listOf(
+            "在 Yellow 回锁状态下，Bootloader 每次开机都会校验 init_boot 的 AVB 签名是否匹配你的私钥。",
+            "如果使用 KSU 管理器直接安装，写入的镜像没有你的 AVB Footer，重启后会立刻无法进入系统。",
+            "正确做法：用 AVBForge 导出纯净底包 → 在 KSU 管理器选择『修补文件』 → 交回 AVBForge 重新注入 DSU 公钥并自签名后再单刷 init_boot（不清空数据）。",
+        ),
+        caution = "只要保持同一把自签名私钥，单刷 init_boot 绝对不会格式化用户数据。",
+    )
+
+    val KSU_STRIP_EXPLAIN = HelpDoc(
+        title = "为什么要自动剥离旧版 KernelSU？",
+        summary = "如果你当前的 init_boot 已经打过 KernelSU LKM 补丁，直接把它再交给新的 KSU 管理器二次修补容易引发冲突或启动失败。",
+        bullets = listOf(
+            "KernelSU LKM 修补 init_boot 时，会把原厂 init 改名为 init.real，再放入自己的 init 桩程序与 kernelsu.ko。",
+            "AVBForge 导出底包前会自动先备份当前可用的 init_boot，再将 init.real 还原为 init 并移除 kernelsu.ko / ksu_config，得到 100% 干净的原厂底包。",
+            "无论你想升级官版 KSU，还是换用 KSU Next / SukiSU，都可以放心拿这个纯净底包去修补。",
+        ),
+    )
 }

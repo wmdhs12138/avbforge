@@ -91,6 +91,59 @@ impl CpioArchive {
         self.get(name).is_some()
     }
 
+    /// Remove all entries matching normalized `name`. Returns true if any entry was removed.
+    pub fn remove_entry(&mut self, name: &str) -> bool {
+        let norm = name.trim_start_matches('/');
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| e.name.trim_start_matches('/') != norm);
+        self.entries.len() != before
+    }
+
+    /// Rename entry `from` to `to` (replacing any existing `to`), preserving original mode/uid/gid/mtime/data.
+    pub fn rename_entry(&mut self, from: &str, to: &str) -> bool {
+        let from_norm = from.trim_start_matches('/');
+        let to_norm = to.trim_start_matches('/');
+        if !self.has(from_norm) {
+            return false;
+        }
+        if from_norm != to_norm {
+            self.remove_entry(to_norm);
+        }
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.name.trim_start_matches('/') == from_norm)
+        {
+            entry.name = to_norm.to_string();
+            entry.raw_chunk = encode_cpio_entry_full(
+                to_norm,
+                entry.mode,
+                entry.uid,
+                entry.gid,
+                entry.nlink,
+                entry.mtime,
+                &entry.data,
+                entry.ino,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Strip KernelSU LKM ramdisk patch (`init.real -> init`, remove `kernelsu.ko` & `ksu_config`).
+    /// Returns true if any KernelSU artifact was detected and stripped.
+    pub fn strip_kernelsu(&mut self) -> bool {
+        let mut modified = false;
+        if self.has("init.real") {
+            modified |= self.rename_entry("init.real", "init");
+        }
+        modified |= self.remove_entry("kernelsu.ko");
+        modified |= self.remove_entry("ksu_config");
+        modified
+    }
+
     /// Ensure parent directories exist and insert/replace a regular file entry (0644, root:root).
     pub fn upsert_file(&mut self, path: &str, mode: u32, data: Vec<u8>) {
         let norm = path.trim_start_matches('/');
@@ -164,15 +217,29 @@ impl CpioArchive {
 }
 
 pub fn encode_cpio_entry(name: &str, mode: u32, data: &[u8], ino: u32, nlink: u32) -> Vec<u8> {
+    encode_cpio_entry_full(name, mode, 0, 0, nlink, 0, data, ino)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_cpio_entry_full(
+    name: &str,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u32,
+    mtime: u32,
+    data: &[u8],
+    ino: u32,
+) -> Vec<u8> {
     let name_bytes = [name.as_bytes(), &[0u8]].concat();
     let hdr = format!(
         "070701{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
         ino,
         mode,
-        0u32,
-        0u32,
+        uid,
+        gid,
         nlink,
-        0u32,
+        mtime,
         data.len() as u32,
         0u32,
         0u32,
@@ -210,6 +277,29 @@ mod tests {
         assert_eq!(
             parsed.get("first_stage_ramdisk/avb/q-gsi.avbpubkey").unwrap().data,
             vec![0x42; 520]
+        );
+    }
+
+    #[test]
+    fn cpio_strip_kernelsu_restores_stock_init() {
+        let mut a = CpioArchive { entries: vec![] };
+        a.upsert_file("init", 0o100755, b"KSU-STUB-INIT".to_vec());
+        a.upsert_file("init.real", 0o100750, b"STOCK-ANDROID-INIT".to_vec());
+        a.upsert_file("kernelsu.ko", 0o100644, vec![0xAA; 128]);
+        a.upsert_file("ksu_config", 0o100644, b"KSU_VER=3".to_vec());
+        a.upsert_file("first_stage_ramdisk/avb/q-gsi.avbpubkey", 0o100644, vec![0x11; 520]);
+
+        assert!(a.strip_kernelsu());
+        let bytes = a.to_bytes();
+        let parsed = CpioArchive::parse(&bytes).unwrap();
+        assert!(!parsed.has("init.real"));
+        assert!(!parsed.has("kernelsu.ko"));
+        assert!(!parsed.has("ksu_config"));
+        assert_eq!(parsed.get("init").unwrap().data, b"STOCK-ANDROID-INIT");
+        assert_eq!(parsed.get("init").unwrap().mode, 0o100750);
+        assert_eq!(
+            parsed.get("first_stage_ramdisk/avb/q-gsi.avbpubkey").unwrap().data,
+            vec![0x11; 520]
         );
     }
 }
