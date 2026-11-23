@@ -105,8 +105,8 @@ fun DsuScreen(
     Column(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // Section 1: First-Time DSU Enablement (inject avbpubkey into current init_boot)
         M3ESectionLabel("1 · 首次使用 DSU 适配", helpDoc = HelpDocs.DSU_FIRST_SETUP)

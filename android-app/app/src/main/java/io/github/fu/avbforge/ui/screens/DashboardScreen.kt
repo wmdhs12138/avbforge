@@ -108,8 +108,8 @@ fun DashboardScreen(
     Column(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // 1. Self-Signed System Status Card (Pure Read-Only)
         M3EHeroCard(
@@ -118,13 +118,13 @@ fun DashboardScreen(
                 !isNeo9 -> "非目标机型"
                 snap.sdkInt >= 35 -> "高版本固件警示"
                 isYellow -> "自签名系统运行中"
-                vbs == "green" -> "原厂系统 (可迁移)"
+                vbs == "green" -> "原厂系统"
                 else -> "AVB: ${snap.verifiedBootState}"
             },
             subtitle = if (snap == null) {
-                "请在 KernelSU 授予超级用户权限后点击右上角刷新"
+                "请在 KernelSU 授予权限后点右上角刷新"
             } else {
-                "${snap.manufacturer} ${snap.model} · Android ${snap.androidRelease} (SDK ${snap.sdkInt})"
+                "${snap.manufacturer} ${snap.model} · Android ${snap.androidRelease}"
             },
             icon = when {
                 snap == null -> Icons.Rounded.Security
@@ -141,7 +141,7 @@ fun DashboardScreen(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Surface(shape = CircleShape, color = sysHeroFg) {
                         Row(
@@ -151,7 +151,7 @@ fun DashboardScreen(
                         ) {
                             Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = sysHeroBg, modifier = Modifier.size(16.dp))
                             Text(
-                                text = "当前活动槽位：$activeLetter ($activeSlot)",
+                                text = "活动槽位 $activeLetter ($activeSlot)",
                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                                 color = sysHeroBg,
                             )
@@ -159,10 +159,10 @@ fun DashboardScreen(
                     }
                     Surface(shape = CircleShape, color = sysHeroFg.copy(alpha = 0.14f)) {
                         Text(
-                            text = "备用：$inactiveLetter",
+                            text = "备用 $inactiveLetter",
                             style = MaterialTheme.typography.labelMedium,
                             color = sysHeroFg,
-                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                         )
                     }
                     Spacer(Modifier.weight(1f))
@@ -176,11 +176,11 @@ fun DashboardScreen(
             val dsuBg = if (dsuReady) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
             val dsuFg = if (dsuReady) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
             M3EHeroCard(
-                title = if (dsuReady) "DSU 自签名已就绪" else "DSU 尚未适配公钥",
+                title = if (dsuReady) "DSU 自签名已就绪" else "DSU 尚未适配",
                 subtitle = if (dsuReady) {
-                    "init_boot 已注入 ${snap.initBootAvbpubkeys.first().substringAfterLast('/')} · 可前往「DSU」页安装 GSI"
+                    "已注入 ${snap.initBootAvbpubkeys.first().substringAfterLast('/')} · 可直接体验 GSI"
                 } else {
-                    "init_boot 暂无 DSU 公钥 · 请前往「DSU」页一键启用"
+                    "尚未注入公钥 · 前往「DSU」页一键启用"
                 },
                 icon = Icons.Rounded.SystemUpdate,
                 containerColor = dsuBg,
@@ -223,58 +223,55 @@ fun DashboardScreen(
             )
         }
 
-        // 3. Compact Read-Only Key-Value Summary (Distinct Visual Language from Action Rows!)
+        // 3. Compact Read-Only Key-Value Summary (Airy & Uncluttered)
         if (snap != null) {
-            M3ESectionLabel("核心状态摘要")
+            M3ESectionLabel("核心状态")
             Surface(
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(26.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
                     InfoKVRow(
                         label = "KernelSU",
-                        value = buildString {
-                            append(snap.ksuVersion?.substringBefore(" (") ?: "未检测到 ksud")
-                            if (snap.initBootHasKsu == true) append(" · LKM已注入")
-                        },
+                        value = snap.ksuVersion?.substringBefore(" (") ?: if (snap.initBootHasKsu == true) "已注入" else "未安装",
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
                     InfoKVRow(
                         label = "密钥匹配",
                         value = when {
-                            defaultKey == null -> "密钥库未导入"
-                            keyMatchesVbmeta -> "已匹配本机 vbmeta"
-                            else -> "与本机 vbmeta 不同"
+                            defaultKey == null -> "未导入"
+                            keyMatchesVbmeta -> "与本机一致"
+                            else -> "与本机不同"
                         },
                         helpDoc = HelpDocs.VBMETA_KEY,
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
                     InfoKVRow(
                         label = "DSU 公钥",
-                        value = if (dsuReady) "已注入 (${snap.initBootAvbpubkeys.size})" else "未注入",
+                        value = if (dsuReady) "已注入" else "未注入",
                         helpDoc = HelpDocs.DSU_PUBKEY,
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
                     InfoKVRow(
-                        label = "内核与 VNDK",
-                        value = "${snap.kernelRelease.substringBefore('-')} · VNDK ${snap.vndkVersion}",
+                        label = "底层环境",
+                        value = "VNDK ${snap.vndkVersion} · SDK ${snap.sdkInt}",
                     )
                 }
             }
 
-            // 4. Collapsible Low-Level Technical Details (Hidden by default for clean Home!)
+            // 4. Collapsible Low-Level Technical Details
             Surface(
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(26.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(24.dp))
+                    .clip(RoundedCornerShape(26.dp))
                     .clickable { expandAdvanced = !expandAdvanced },
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -344,11 +341,15 @@ private fun InfoKVRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 12.dp),
+            .padding(vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (helpDoc != null) {
                 M3EHelpButton(doc = helpDoc)

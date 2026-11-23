@@ -153,8 +153,8 @@ fun ForgeScreen(
     Column(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         // Notice banner about first-time data wipe when on Green stock
         if (!isYellow) {
@@ -510,35 +510,35 @@ private fun BackupPartitionsSheet(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                .padding(horizontal = 14.dp, vertical = 13.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             Checkbox(checked = checked, onCheckedChange = { selected[meta.name] = it })
-                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
                                     Text(meta.name, style = MaterialTheme.typography.titleSmall)
-                                    if (meta.minimalDefault) {
-                                        M3EPillChip(
-                                            text = "核心必选",
-                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        )
-                                    } else if (inChain) {
-                                        M3EPillChip(
-                                            text = "首次迁移必选",
-                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
+                                    Text(
+                                        text = formatBytes(actualBytes),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
                                 }
-                                Text(meta.desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                val tagPrefix = when {
+                                    meta.minimalDefault -> "核心必选 · "
+                                    inChain -> "首次必选 · "
+                                    else -> ""
+                                }
+                                Text(
+                                    text = "$tagPrefix${meta.desc}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                            Text(
-                                text = formatBytes(actualBytes),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
                         }
                     }
                 }

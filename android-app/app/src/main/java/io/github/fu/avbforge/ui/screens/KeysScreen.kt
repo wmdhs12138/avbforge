@@ -126,8 +126,8 @@ fun KeysScreen(
             Column(
                 modifier = Modifier
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 M3ESectionLabel("已托管密钥（${state.keys.size}）· 点击管理", helpDoc = HelpDocs.PKMD_EXPORT)
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {

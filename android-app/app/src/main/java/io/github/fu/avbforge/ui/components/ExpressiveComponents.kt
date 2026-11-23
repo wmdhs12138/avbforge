@@ -292,54 +292,55 @@ fun M3EHeroCard(
             ),
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.padding(22.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // Top bar: Icon on left, optional Status Pill on right — zero crowding with title!
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = animatedFg.copy(alpha = 0.13f),
                     modifier = Modifier
-                        .size(52.dp)
+                        .size(46.dp)
                         .scale(if (isPulsing) pulse else 1f),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(icon, contentDescription = null, tint = animatedFg, modifier = Modifier.size(28.dp))
+                        Icon(icon, contentDescription = null, tint = animatedFg, modifier = Modifier.size(25.dp))
                     }
-                }
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = animatedFg,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = animatedFg.copy(alpha = 0.80f),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
                 if (badgeText != null) {
                     Surface(
                         shape = CircleShape,
-                        color = animatedFg.copy(alpha = 0.15f),
+                        color = animatedFg.copy(alpha = 0.14f),
                     ) {
                         Text(
                             text = badgeText,
                             style = MaterialTheme.typography.labelMedium,
                             color = animatedFg,
-                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         )
                     }
                 }
             }
+
+            // Full-width Title & Subtitle with generous breathing room
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = animatedFg,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = animatedFg.copy(alpha = 0.80f),
+                )
+            }
+
             if (bottomContent != null) {
                 bottomContent()
             }
@@ -388,25 +389,25 @@ fun M3EGroupRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 18.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (icon != null) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = iconBg,
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(42.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(21.dp))
                     }
                 }
             }
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
                         text = title,
