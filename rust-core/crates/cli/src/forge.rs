@@ -498,15 +498,17 @@ pub fn dsu_install(
         &format!("Installing DSU via gsi_tool (gsi={gsi_size} B, userdata={userdata_size_bytes} B)..."),
     );
 
+    let install_args = [
+        "install",
+        "--gsi-size",
+        &gsi_size.to_string(),
+        "--userdata-size",
+        &userdata_size_bytes.to_string(),
+        "--wipe",
+        "--no-reboot",
+    ];
     let out = Command::new("/system/bin/gsi_tool")
-        .args([
-            "install",
-            "--gsi-size",
-            &gsi_size.to_string(),
-            "--userdata-size",
-            &userdata_size_bytes.to_string(),
-            "--wipe",
-        ])
+        .args(install_args)
         .stdin(Stdio::from(img_file))
         .output()
         .context("Failed to execute /system/bin/gsi_tool")?;
@@ -522,16 +524,18 @@ pub fn dsu_install(
         );
     }
 
-    if single_boot {
-        let en = Command::new("/system/bin/gsi_tool")
-            .args(["enable", "-s"])
-            .output()?;
-        if !en.status.success() {
-            bail!(
-                "gsi_tool enable -s failed: {}",
-                String::from_utf8_lossy(&en.stderr)
-            );
-        }
+    let en_args: &[&str] = if single_boot {
+        &["enable", "-s"]
+    } else {
+        &["enable"]
+    };
+    let en = Command::new("/system/bin/gsi_tool").args(en_args).output()?;
+    if !en.status.success() {
+        bail!(
+            "gsi_tool {:?} failed: {}",
+            en_args,
+            String::from_utf8_lossy(&en.stderr)
+        );
     }
 
     let status = dsu_cmd(&["status"])?;

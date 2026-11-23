@@ -267,7 +267,7 @@ fun DsuWizard(
                             "架构与分区：必须选择 arm64 + A/B (ab) 版本，例如 arm64_bgN 或 arm64_bvN。",
                             "Root 变体：推荐选择后缀为 N（无内置 su）的包，不要选带内置 su (S) 的包，兼容更稳。",
                             "支持格式：可直接选择 .img、.img.xz、.img.gz 以及 Android Sparse 稀疏镜像，引擎会自动流式解压。",
-                            "常见推荐：Ponces AOSP、LineageOS TrebleDroid、crDroid / PixelOS GSI（Android 14/15/16 均可尝鲜）。",
+                            "常见推荐：优先选用基于 TrebleDroid 的 Android 14 / 15 GSI（如 Ponces AOSP、LineageOS TD）；由于本机底层 Vendor 为 Android 13 (VNDK 33)，部分 Android 16 第三方魔改 GSI 可能因 HAL 兼容问题进不了桌面并自动回退原系统。",
                         ),
                     )
 
