@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoFixHigh
@@ -21,14 +20,12 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.WarningAmber
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -42,7 +39,9 @@ import io.github.fu.avbforge.core.UriPathResolver
 import io.github.fu.avbforge.ui.AvbForgeViewModel
 import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
+import io.github.fu.avbforge.ui.components.DryRunCommandDialog
 import io.github.fu.avbforge.ui.components.M3EGroupRow
+import io.github.fu.avbforge.ui.components.WhiteBoxConsoleCard
 import io.github.fu.avbforge.ui.components.M3EPillChip
 import io.github.fu.avbforge.ui.components.M3EPrimaryButton
 import io.github.fu.avbforge.ui.components.WizardCalloutCard
@@ -67,6 +66,7 @@ fun UpdateKsuWizard(
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val consoleState by vm.consoleState.collectAsState()
     val snap = state.snapshot
     val activeSlot = snap?.activeSlot?.ifBlank { "_b" } ?: "_b"
     val isYellow = snap?.verifiedBootState.equals("yellow", ignoreCase = true)
@@ -190,6 +190,13 @@ fun UpdateKsuWizard(
                         ),
                     )
                 }
+
+                WhiteBoxConsoleCard(
+                    state = consoleState,
+                    onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                    title = "导出纯净底包 · 白盒控制台",
+                    busy = state.busy,
+                )
             }
 
             // STEP 2: Patch with User's Chosen KSU Manager & Pick Back
@@ -323,7 +330,7 @@ fun UpdateKsuWizard(
                             )
 
                             M3EPrimaryButton(
-                                text = "② 写入当前槽位 ($activeSlot) init_boot 并回读核验",
+                                text = "② 预览命令并写入 ($activeSlot) init_boot",
                                 icon = Icons.Rounded.FlashOn,
                                 onClick = { confirmFlash = true },
                                 enabled = !state.busy && keyMatchesVbmeta,
@@ -332,33 +339,38 @@ fun UpdateKsuWizard(
                         }
                     }
                 }
+
+                WhiteBoxConsoleCard(
+                    state = consoleState,
+                    onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                    title = "重签与无损单刷 · 白盒控制台",
+                    busy = state.busy,
+                    onReboot = { vm.rebootDevice() },
+                    rebootLabel = "安全重启使新版 KSU 生效",
+                )
             }
         }
     }
 
     if (confirmFlash && state.lastKsuUpdateReport != null) {
-        AlertDialog(
-            onDismissRequest = { confirmFlash = false },
-            shape = RoundedCornerShape(28.dp),
-            title = { Text("确认写入新版 KSU init_boot？") },
-            text = {
-                Text("仅写入活动槽位 $activeSlot 的 init_boot（8 MB），使用与本机一致的密钥签名，不会清空用户数据。写入后会自动清缓存回读核验 SHA-256 与 AVB 签名，完成后手动重启即可生效。")
+        val signedName = File(state.lastKsuUpdateReport.outputPath).name
+        val plannedCommands = listOf(
+            "avbforge-core avb verify --image $signedName --expected-pubkey ${defaultKey?.alias ?: "default"}_pkmd.bin",
+            "su -c "avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $signedName --fsync"",
+            "su -c "avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot"",
+        )
+        DryRunCommandDialog(
+            title = "刷前命令预演确认（init_boot）",
+            safetySummary = "SafetyGate 已通过 · 活动槽位 $activeSlot · 私钥「${defaultKey?.alias ?: "默认"}」与本机 vbmeta 匹配 · 不清空用户数据",
+            plannedCommands = plannedCommands,
+            onConfirm = {
+                confirmFlash = false
+                vm.flashSingleInitBoot(
+                    imagePath = state.lastKsuUpdateReport.outputPath,
+                    successMessage = "新版 KSU init_boot 已写入并通过回读验签！现在重启手机即可生效（数据完好）。",
+                )
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        confirmFlash = false
-                        vm.flashSingleInitBoot(
-                            imagePath = state.lastKsuUpdateReport.outputPath,
-                            successMessage = "新版 KSU init_boot 已写入并通过回读验签！现在重启手机即可生效（数据完好）。",
-                        )
-                    },
-                    shape = CircleShape,
-                ) { Text("确认写入") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmFlash = false }) { Text("取消") }
-            },
+            onDismiss = { confirmFlash = false },
         )
     }
 }

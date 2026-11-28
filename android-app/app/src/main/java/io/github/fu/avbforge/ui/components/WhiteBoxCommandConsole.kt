@@ -9,17 +9,23 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -53,6 +59,7 @@ fun WhiteBoxCommandConsole(
     state: WhiteBoxConsoleState,
     onToggleRawMode: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    embeddedInScroll: Boolean = true,
 ) {
     val manualExpanded = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -128,7 +135,31 @@ fun WhiteBoxCommandConsole(
         }
 
         if (state.showRawJson) {
-            RawJsonPane(lines = state.rawLines, modifier = Modifier.weight(1f, fill = false))
+            RawJsonPane(
+                lines = state.rawLines,
+                modifier = if (embeddedInScroll) {
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 120.dp, max = 320.dp)
+                } else {
+                    Modifier.weight(1f, fill = false)
+                },
+            )
+        } else if (embeddedInScroll) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                state.blocks.forEach { block ->
+                    val expanded = manualExpanded[block.stepId]
+                        ?: (block.status == CommandStatus.RUNNING || block.status == CommandStatus.FAILED)
+                    CommandBlockCard(
+                        block = block,
+                        expanded = expanded,
+                        onToggle = { manualExpanded[block.stepId] = !expanded },
+                    )
+                }
+            }
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
@@ -142,6 +173,74 @@ fun WhiteBoxCommandConsole(
                         expanded = expanded,
                         onToggle = { manualExpanded[block.stepId] = !expanded },
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Drop-in Material 3 Expressive container for embedding [WhiteBoxCommandConsole] inside
+ * scrollable wizard screens, with optional safety-gated reboot action.
+ */
+@Composable
+fun WhiteBoxConsoleCard(
+    state: WhiteBoxConsoleState,
+    onToggleRawMode: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    title: String = "白盒命令执行控制台",
+    busy: Boolean = false,
+    onReboot: (() -> Unit)? = null,
+    rebootLabel: String = "安全重启设备",
+) {
+    if (state.blocks.isEmpty() && state.rawLines.isEmpty()) return
+
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Terminal,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+
+            WhiteBoxCommandConsole(
+                state = state,
+                onToggleRawMode = onToggleRawMode,
+                embeddedInScroll = true,
+            )
+
+            if (onReboot != null && state.readbackVerifyGate == GateStatus.PASSED) {
+                Button(
+                    onClick = onReboot,
+                    enabled = !busy && !state.rebootBlocked,
+                    shape = CircleShape,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PowerSettingsNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(rebootLabel)
                 }
             }
         }
@@ -245,8 +344,16 @@ private fun CommandBlockCard(
                 Spacer(Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
+                        text = block.title,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
                         text = "$ ${block.cmd}",
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -420,7 +527,13 @@ fun DryRunCommandDialog(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     plannedCommands.forEachIndexed { idx, cmd ->
                         Text(
                             text = "${idx + 1}. $ $cmd",

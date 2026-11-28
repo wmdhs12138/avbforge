@@ -79,6 +79,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -98,7 +99,9 @@ import io.github.fu.avbforge.data.LocalGsiImage
 import io.github.fu.avbforge.ui.AvbForgeViewModel
 import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
+import io.github.fu.avbforge.ui.components.DryRunCommandDialog
 import io.github.fu.avbforge.ui.components.M3EGroupRow
+import io.github.fu.avbforge.ui.components.WhiteBoxConsoleCard
 import io.github.fu.avbforge.ui.components.M3EHelpButton
 import io.github.fu.avbforge.ui.components.M3EHeroCard
 import io.github.fu.avbforge.ui.components.M3EPillChip
@@ -139,6 +142,7 @@ fun DsuWizard(
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val consoleState by vm.consoleState.collectAsState()
     val snap = state.snapshot
     val dsuReady = snap?.initBootAvbpubkeys?.isNotEmpty() == true
     val isYellow = snap?.verifiedBootState.equals("yellow", ignoreCase = true)
@@ -152,6 +156,7 @@ fun DsuWizard(
     }
     var targetKeyName by remember { mutableStateOf(fstabNames.firstOrNull() ?: "q-gsi.avbpubkey") }
     var confirmFlashDsuInit by remember { mutableStateOf(false) }
+    var confirmInstallDsu by remember { mutableStateOf(false) }
 
     var step by remember { mutableIntStateOf(0) }
     var gsiInputPath by remember { mutableStateOf("") }
@@ -306,13 +311,22 @@ fun DsuWizard(
                             body = "KSU 保留：${if (rep.hasKernelsu) "是" else "否"} · 注入路径：${rep.injectedPaths.joinToString(", ")}",
                         )
                         M3EPrimaryButton(
-                            text = "② 写入活动槽位 init_boot 并回读校验",
+                            text = "② 预览命令并写入 init_boot（含回读校验）",
                             icon = Icons.Rounded.FlashOn,
                             onClick = { confirmFlashDsuInit = true },
                             enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+
+                    WhiteBoxConsoleCard(
+                        state = consoleState,
+                        onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                        title = "DSU 公钥注入与写入 · 白盒控制台",
+                        busy = state.busy,
+                        onReboot = { vm.rebootDevice() },
+                        rebootLabel = "安全重启使 DSU 公钥生效",
+                    )
                 }
             }
 
@@ -496,6 +510,13 @@ fun DsuWizard(
                                     },
                                 )
                             }
+
+                            WhiteBoxConsoleCard(
+                                state = consoleState,
+                                onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                                title = "GSI 修复与签名 · 白盒控制台",
+                                busy = state.busy,
+                            )
                         }
 
                         // STEP 3: Configure Userdata & Single-Boot Install
@@ -576,20 +597,21 @@ fun DsuWizard(
 
                             if (rep != null) {
                                 M3EPrimaryButton(
-                                    text = "通过原生 gsi_tool 写入 DSU",
+                                    text = "预览命令并通过 gsi_tool 写入 DSU",
                                     icon = Icons.Rounded.SystemUpdate,
-                                    onClick = {
-                                        vm.installSignedDsu(
-                                            signedPath = rep.outputPath,
-                                            userdataGiB = gib,
-                                            singleBoot = singleBoot,
-                                        )
-                                    },
+                                    onClick = { confirmInstallDsu = true },
                                     enabled = !state.busy,
                                     loading = state.busy,
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             }
+
+                            WhiteBoxConsoleCard(
+                                state = consoleState,
+                                onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                                title = "DSU 安装与状态回读 · 白盒控制台",
+                                busy = state.busy,
+                            )
 
                             if (state.dsuInfo?.enabled == true ||
                                 state.dsuStatusText.contains("enabled", ignoreCase = true)
@@ -607,7 +629,7 @@ fun DsuWizard(
                                         ) {
                                             Button(
                                                 onClick = { confirmReboot = true },
-                                                enabled = !state.busy,
+                                                enabled = !state.busy && !consoleState.rebootBlocked,
                                                 shape = CircleShape,
                                                 modifier = Modifier.weight(1f),
                                             ) {
@@ -701,25 +723,48 @@ fun DsuWizard(
 
     // Confirmation Dialogs
     if (confirmFlashDsuInit && state.lastDsuPatchReport != null) {
-        AlertDialog(
-            onDismissRequest = { confirmFlashDsuInit = false },
-            shape = RoundedCornerShape(28.dp),
-            title = { Text("写入适配 DSU 的 init_boot？") },
-            text = {
-                Text("仅写入当前活动槽位 init_boot（8 MB），保留 KernelSU，不清除用户数据。写入后会自动清缓存回读验签，完成后重启一次手机即可生效。")
+        val activeSlot = snap?.activeSlot?.ifBlank { "_b" } ?: "_b"
+        val imgName = File(state.lastDsuPatchReport.outputPath).name
+        DryRunCommandDialog(
+            title = "刷前命令预演确认（DSU init_boot）",
+            safetySummary = "活动槽位 $activeSlot · 保留 KernelSU · 注入 $targetKeyName · 不清空用户数据",
+            plannedCommands = listOf(
+                "avbforge-core avb verify --image $imgName --expected-pubkey ${defaultKey?.alias ?: "default"}_pkmd.bin",
+                "su -c "avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $imgName --fsync"",
+                "su -c "avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot"",
+            ),
+            onConfirm = {
+                confirmFlashDsuInit = false
+                vm.flashPreparedDsuInitBoot(state.lastDsuPatchReport.outputPath)
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        confirmFlashDsuInit = false
-                        vm.flashPreparedDsuInitBoot(state.lastDsuPatchReport.outputPath)
-                    },
-                    shape = CircleShape,
-                ) { Text("确认写入并校验") }
+            onDismiss = { confirmFlashDsuInit = false },
+        )
+    }
+
+    if (confirmInstallDsu && state.lastGsiReport != null) {
+        val rep = state.lastGsiReport
+        val gib = userdataSlider.roundToInt()
+        val userdataBytes = gib.toLong() * 1024L * 1024L * 1024L
+        val imgName = File(rep.outputPath).name
+        val enableCmd = if (singleBoot) "gsi_tool enable -s && gsi_tool status" else "gsi_tool enable && gsi_tool status"
+        DryRunCommandDialog(
+            title = "DSU 安装命令预演确认",
+            safetySummary = "独立 Userdata ${gib} GiB · ${if (singleBoot) "单次防变砖启动 (-s)" else "持续启动模式"} · 不修改原厂 OriginOS 分区",
+            plannedCommands = listOf(
+                "avbforge-core avb verify --image $imgName",
+                "su -c "avbforge-core dsu stage --image $imgName -> /data/gsi/"",
+                "su -c "gsi_tool install --gsi-size ${rep.finalSize} --userdata-size $userdataBytes --wipe --no-reboot"",
+                "su -c "$enableCmd"",
+            ),
+            onConfirm = {
+                confirmInstallDsu = false
+                vm.installSignedDsu(
+                    signedPath = rep.outputPath,
+                    userdataGiB = gib,
+                    singleBoot = singleBoot,
+                )
             },
-            dismissButton = {
-                TextButton(onClick = { confirmFlashDsuInit = false }) { Text("取消") }
-            },
+            onDismiss = { confirmInstallDsu = false },
         )
     }
 

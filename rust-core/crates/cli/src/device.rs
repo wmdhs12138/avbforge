@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::events::whitebox::{emit_plan, run_step, GateKind, PlannedStep};
 use crate::events::{emit_log, emit_progress};
 
 pub const STANDARD_BOOT_PARTITIONS: &[&str] = &[
@@ -264,6 +265,18 @@ pub fn backup_partitions(
         partitions.to_vec()
     };
 
+    emit_plan(
+        list.iter()
+            .map(|part| {
+                PlannedStep::new(
+                    format!("backup_{part}"),
+                    format!("备份分区 {part}{slot}"),
+                    format!("avbforge-core backup-partitions --partition {part}{slot}"),
+                )
+            })
+            .collect(),
+    );
+
     let mut entries = Vec::new();
     let total = list.len() as u64;
     for (idx, part) in list.iter().enumerate() {
@@ -271,24 +284,57 @@ pub fn backup_partitions(
         let dev = PathBuf::from(format!("/dev/block/by-name/{part}{slot}"));
         if !dev.exists() {
             emit_log("warn", &format!("Partition device {} not found, skipping", dev.display()));
+            let _ = run_step(
+                format!("backup_{part}"),
+                format!("跳过不存在分区 {part}{slot}"),
+                format!("avbforge-core backup-partitions --partition {part}{slot}"),
+                None,
+                "SKIPPED",
+                |step| {
+                    step.warn(format!("Partition device {} not found, skipping", dev.display()));
+                    Ok(())
+                },
+            );
             continue;
         }
-        let sz = blockdev_size(&dev)?;
         let filename = format!("{part}.img");
         let dst = out_dir.join(&filename);
-        emit_log("info", &format!("Dumping {part}{slot} ({sz} bytes) -> {}", dst.display()));
-        let sha256 = copy_block_head(&dev, &dst, sz)?;
-        let avb_pubkey_sha1 = load_avb_image(&dst)
-            .ok()
-            .and_then(|l| l.vbmeta.public_key_sha1());
-        entries.push(PartitionBackupEntry {
-            partition: part.clone(),
-            slot: slot.clone(),
-            filename,
-            size: sz,
-            sha256,
-            avb_pubkey_sha1,
-        });
+        let entry = run_step(
+            format!("backup_{part}"),
+            format!("备份分区 {part}{slot}"),
+            format!("avbforge-core backup-partitions --partition {part}{slot} --out {}", dst.display()),
+            None,
+            "BACKED_UP",
+            |step| {
+                let sz = blockdev_size(&dev)?;
+                emit_log("info", &format!("Dumping {part}{slot} ({sz} bytes) -> {}", dst.display()));
+                let sha256 = copy_block_head(&dev, &dst, sz)?;
+                let avb_pubkey_sha1 = load_avb_image(&dst)
+                    .ok()
+                    .and_then(|l| l.vbmeta.public_key_sha1());
+                step.kv(
+                    "partition dumped",
+                    &[
+                        ("device", &dev.display().to_string()),
+                        ("bytes", &sz.to_string()),
+                        ("sha256", &sha256),
+                    ],
+                );
+                if let Some(ref pk) = avb_pubkey_sha1 {
+                    step.kv("avb pubkey", &[("sha1", pk)]);
+                }
+                step.ok_line(format!("saved {}", dst.display()));
+                Ok(PartitionBackupEntry {
+                    partition: part.clone(),
+                    slot: slot.clone(),
+                    filename,
+                    size: sz,
+                    sha256,
+                    avb_pubkey_sha1,
+                })
+            },
+        )?;
+        entries.push(entry);
     }
     emit_progress("backup", total, total);
 
@@ -315,11 +361,44 @@ pub fn flash_partition(
     slot_override: Option<&str>,
     expected_pubkey_path: Option<&Path>,
 ) -> Result<FlashReport> {
+    flash_partition_inner(partition, image_path, slot_override, expected_pubkey_path, true)
+}
+
+fn flash_partition_inner(
+    partition: &str,
+    image_path: &Path,
+    slot_override: Option<&str>,
+    expected_pubkey_path: Option<&Path>,
+    emit_step_plan: bool,
+) -> Result<FlashReport> {
     let slot = match slot_override {
         Some(s) => s.to_string(),
         None => getprop("ro.boot.slot_suffix"),
     };
     let dev = PathBuf::from(format!("/dev/block/by-name/{partition}{slot}"));
+
+    if emit_step_plan {
+        emit_plan(vec![
+            PlannedStep::new(
+                format!("verify_{partition}"),
+                format!("刷前离线验签 {partition}"),
+                format!("avbforge-core avb verify --image {}", image_path.display()),
+            ),
+            PlannedStep::new(
+                format!("flash_{partition}"),
+                format!("写入块设备 {partition}{slot} 并落盘"),
+                format!(
+                    "avbforge-core flash-partition --partition {partition} --slot {slot} --fsync"
+                ),
+            ),
+            PlannedStep::new(
+                format!("readback_{partition}"),
+                format!("回读 {partition}{slot} 核对 SHA-256 与 AVB"),
+                format!("avbforge-core verify-readback --device {}", dev.display()),
+            ),
+        ]);
+    }
+
     if !dev.exists() {
         bail!("Target partition device does not exist: {}", dev.display());
     }
@@ -330,48 +409,98 @@ pub fn flash_partition(
     };
 
     // 1. Mandatory pre-flash AVB verification!
-    emit_log("info", &format!("Pre-flash AVB verification on {}", image_path.display()));
-    verify_image(image_path, expected_pk.as_deref(), false, None, true)
-        .context("Refusing to flash: pre-flash AVB verification failed")?;
+    let (img_sz, src_sha) = run_step(
+        format!("verify_{partition}"),
+        format!("刷前离线验签 {partition}"),
+        format!("avbforge-core avb verify --image {}", image_path.display()),
+        Some(GateKind::OfflineVerify),
+        "PASS",
+        |step| {
+            emit_log("info", &format!("Pre-flash AVB verification on {}", image_path.display()));
+            verify_image(image_path, expected_pk.as_deref(), false, None, true)
+                .context("Refusing to flash: pre-flash AVB verification failed")?;
 
-    let dev_sz = blockdev_size(&dev)?;
-    let img_sz = fs::metadata(image_path)?.len();
-    if img_sz > dev_sz {
-        bail!("Image size ({img_sz}) exceeds target partition size ({dev_sz})");
-    }
-    let src_sha = sha256_file(image_path)?;
-
-    // 2. Write image to block device
-    emit_log("info", &format!("Writing {} ({img_sz} bytes) -> {}", image_path.display(), dev.display()));
-    {
-        let mut src = File::open(image_path)?;
-        let mut dst = OpenOptions::new().write(true).open(&dev)?;
-        let mut buf = vec![0u8; 1024 * 1024];
-        let mut written = 0u64;
-        while written < img_sz {
-            let n = src.read(&mut buf)?;
-            if n == 0 {
-                break;
+            let dev_sz = blockdev_size(&dev)?;
+            let img_sz = fs::metadata(image_path)?.len();
+            if img_sz > dev_sz {
+                bail!("Image size ({img_sz}) exceeds target partition size ({dev_sz})");
             }
-            dst.write_all(&buf[..n])?;
-            written += n as u64;
-            emit_progress("flash", written, img_sz);
-        }
-        dst.sync_all()?;
-    }
+            let src_sha = sha256_file(image_path)?;
+            step.kv(
+                "pre-flash image verified",
+                &[
+                    ("partition", partition),
+                    ("bytes", &img_sz.to_string()),
+                    ("dev_bytes", &dev_sz.to_string()),
+                    ("sha256", &src_sha),
+                ],
+            );
+            step.ok_line("offline AVB verify passed");
+            Ok((img_sz, src_sha))
+        },
+    )?;
 
-    // 3. Flush block buffers & readback SHA-256 + post-flash AVB verify
-    let _ = Command::new("sync").status();
-    let _ = Command::new("blockdev").args(["--flushbufs"]).arg(&dev).status();
+    // 2. Write image to block device & flush buffers
+    run_step(
+        format!("flash_{partition}"),
+        format!("写入块设备 {partition}{slot} 并落盘"),
+        format!("avbforge-core flash-partition --partition {partition} --slot {slot} --fsync"),
+        Some(GateKind::BlockFlash),
+        "FLUSHED",
+        |step| {
+            emit_log(
+                "info",
+                &format!("Writing {} ({img_sz} bytes) -> {}", image_path.display(), dev.display()),
+            );
+            {
+                let mut src = File::open(image_path)?;
+                let mut dst = OpenOptions::new().write(true).open(&dev)?;
+                let mut buf = vec![0u8; 1024 * 1024];
+                let mut written = 0u64;
+                while written < img_sz {
+                    let n = src.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    dst.write_all(&buf[..n])?;
+                    written += n as u64;
+                    emit_progress("flash", written, img_sz);
+                }
+                dst.sync_all()?;
+            }
 
-    let tmp_dir = tempfile::tempdir()?;
-    let rb_path = tmp_dir.path().join(format!("{partition}.img"));
-    let rb_sha = copy_block_head(&dev, &rb_path, img_sz)?;
-    if rb_sha != src_sha {
-        bail!("CRITICAL: Readback SHA-256 mismatch! expected={src_sha}, got={rb_sha}");
-    }
-    verify_image(&rb_path, expected_pk.as_deref(), false, None, true)
-        .context("CRITICAL: Post-flash readback AVB verification failed")?;
+            let _ = Command::new("sync").status();
+            let _ = Command::new("blockdev").args(["--flushbufs"]).arg(&dev).status();
+            step.kv(
+                "partition flushed",
+                &[("device", &dev.display().to_string()), ("bytes", &img_sz.to_string())],
+            );
+            step.ok_line("fsync + sync + blockdev --flushbufs completed");
+            Ok(())
+        },
+    )?;
+
+    // 3. Readback SHA-256 + post-flash AVB verify
+    let rb_sha = run_step(
+        format!("readback_{partition}"),
+        format!("回读 {partition}{slot} 核对 SHA-256 与 AVB"),
+        format!("avbforge-core verify-readback --device {}", dev.display()),
+        Some(GateKind::ReadbackVerify),
+        "VERIFIED",
+        |step| {
+            let tmp_dir = tempfile::tempdir()?;
+            let rb_path = tmp_dir.path().join(format!("{partition}.img"));
+            let rb_sha = copy_block_head(&dev, &rb_path, img_sz)?;
+            step.kv("readback digest", &[("expected", &src_sha), ("actual", &rb_sha)]);
+            if rb_sha != src_sha {
+                bail!("CRITICAL: Readback SHA-256 mismatch! expected={src_sha}, got={rb_sha}");
+            }
+            verify_image(&rb_path, expected_pk.as_deref(), false, None, true)
+                .context("CRITICAL: Post-flash readback AVB verification failed")?;
+            step.ok_line("readback SHA-256 & secondary AVB verify passed");
+            Ok(rb_sha)
+        },
+    )?;
 
     emit_log("info", &format!("Verified readback SHA-256 ({rb_sha}) & AVB signature OK!"));
     Ok(FlashReport {
@@ -389,17 +518,74 @@ pub fn flash_bundle(
     slot_override: Option<&str>,
     expected_pubkey_path: &Path,
 ) -> Result<Vec<FlashReport>> {
+    let slot = match slot_override {
+        Some(s) => s.to_string(),
+        None => getprop("ro.boot.slot_suffix"),
+    };
     let expected_pk = fs::read(expected_pubkey_path)?;
     let vbmeta_path = bundle_dir.join("vbmeta.img");
     if !vbmeta_path.exists() {
         bail!("Bundle directory missing vbmeta.img: {}", bundle_dir.display());
     }
 
+    let mut planned = vec![PlannedStep::new(
+        "bundle_verify_chain",
+        "刷前全链离线验签",
+        format!("avbforge-core avb verify --image {} --follow-chain", vbmeta_path.display()),
+    )];
+    for &part in STANDARD_BOOT_PARTITIONS {
+        if part != "vbmeta" && bundle_dir.join(format!("{part}.img")).exists() {
+            planned.push(PlannedStep::new(
+                format!("verify_{part}"),
+                format!("刷前离线验签 {part}"),
+                format!("avbforge-core avb verify --image {part}.img"),
+            ));
+            planned.push(PlannedStep::new(
+                format!("flash_{part}"),
+                format!("写入 {part}{slot} 并落盘"),
+                format!("avbforge-core flash-partition --partition {part} --slot {slot} --fsync"),
+            ));
+            planned.push(PlannedStep::new(
+                format!("readback_{part}"),
+                format!("回读核对 {part}{slot}"),
+                format!("avbforge-core verify-readback --device /dev/block/by-name/{part}{slot}"),
+            ));
+        }
+    }
+    planned.push(PlannedStep::new(
+        "verify_vbmeta",
+        "刷前离线验签 vbmeta",
+        "avbforge-core avb verify --image vbmeta.img",
+    ));
+    planned.push(PlannedStep::new(
+        "flash_vbmeta",
+        format!("写入 vbmeta{slot} 并落盘"),
+        format!("avbforge-core flash-partition --partition vbmeta --slot {slot} --fsync"),
+    ));
+    planned.push(PlannedStep::new(
+        "readback_vbmeta",
+        format!("回读核对 vbmeta{slot}"),
+        format!("avbforge-core verify-readback --device /dev/block/by-name/vbmeta{slot}"),
+    ));
+    emit_plan(planned);
+
     // Mandatory full-chain verification before flashing ANY partition!
-    emit_log("info", "Running mandatory full-chain AVB verification before flashing bundle...");
-    let chain = verify_image(&vbmeta_path, Some(&expected_pk), true, None, true)
-        .context("Refusing to flash bundle: full-chain AVB verification failed")?;
-    emit_log("info", &format!("Full-chain verification passed ({} images verified).", chain.len()));
+    let chain = run_step(
+        "bundle_verify_chain",
+        "刷前全链离线验签",
+        format!("avbforge-core avb verify --image {} --follow-chain", vbmeta_path.display()),
+        Some(GateKind::OfflineVerify),
+        "CHAIN_PASS",
+        |step| {
+            emit_log("info", "Running mandatory full-chain AVB verification before flashing bundle...");
+            let chain = verify_image(&vbmeta_path, Some(&expected_pk), true, None, true)
+                .context("Refusing to flash bundle: full-chain AVB verification failed")?;
+            emit_log("info", &format!("Full-chain verification passed ({} images verified).", chain.len()));
+            step.kv("verified_images", &[("count", &chain.len().to_string())]);
+            step.ok_line("full-chain offline AVB verify passed");
+            Ok(chain)
+        },
+    )?;
 
     // Determine order: chained partitions first, vbmeta last (atomic-like safety)
     let mut reports = Vec::new();
@@ -417,11 +603,12 @@ pub fn flash_bundle(
         }
         let img = bundle_dir.join(format!("{part}.img"));
         if img.exists() {
-            reports.push(flash_partition(
+            reports.push(flash_partition_inner(
                 &part,
                 &img,
                 slot_override,
                 Some(expected_pubkey_path),
+                false,
             )?);
         }
     }

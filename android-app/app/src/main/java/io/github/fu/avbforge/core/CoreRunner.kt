@@ -30,6 +30,7 @@ class CoreRunner(private val context: Context) {
         timeoutSeconds: Long = 600,
         onLog: (String, String) -> Unit = { _, _ -> },
         onProgress: (CoreProgress) -> Unit = {},
+        onRawLine: (String) -> Unit = {},
     ): Result<JsonElement> = withContext(Dispatchers.IO) {
         val bin = coreBinaryPath()
         if (!bin.exists()) {
@@ -59,6 +60,7 @@ class CoreRunner(private val context: Context) {
                 br.lineSequence().forEach { line ->
                     val trimmed = line.trim()
                     if (trimmed.isNotEmpty()) {
+                        onRawLine(trimmed)
                         val parsedErr = runCatching {
                             val obj = json.parseToJsonElement(trimmed).jsonObject
                             if (obj["event"]?.jsonPrimitive?.content == "error") {
@@ -76,6 +78,7 @@ class CoreRunner(private val context: Context) {
             br.lineSequence().forEach { line ->
                 val trimmed = line.trim()
                 if (trimmed.isEmpty()) return@forEach
+                onRawLine(trimmed)
                 val parsed = runCatching { json.parseToJsonElement(trimmed).jsonObject }.getOrNull()
                 if (parsed == null) {
                     onLog("info", trimmed)

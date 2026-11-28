@@ -9,6 +9,9 @@ import io.github.fu.avbforge.core.KeyVaultManager
 import io.github.fu.avbforge.core.SafetyAssessment
 import io.github.fu.avbforge.core.SafetyGate
 import io.github.fu.avbforge.data.BackupManifest
+import io.github.fu.avbforge.data.CommandBlock
+import io.github.fu.avbforge.data.WhiteBoxConsoleState
+import io.github.fu.avbforge.data.WhiteBoxEventReducer
 import io.github.fu.avbforge.data.CoreProgress
 import io.github.fu.avbforge.data.DeviceSnapshot
 import io.github.fu.avbforge.data.DsuInfoReport
@@ -57,6 +60,9 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState(keys = vault.listKeys()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    private val _consoleState = MutableStateFlow(WhiteBoxConsoleState())
+    val consoleState: StateFlow<WhiteBoxConsoleState> = _consoleState.asStateFlow()
+
     val baseWorkDir: File
         get() = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
@@ -80,6 +86,26 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearLogs() {
         _state.update { it.copy(logs = emptyList()) }
+    }
+
+    fun prepareWhiteBoxConsole(plannedSteps: List<Pair<String, String>> = emptyList()) {
+        _consoleState.value = WhiteBoxConsoleState(
+            blocks = plannedSteps.mapIndexed { idx, (title, cmd) ->
+                CommandBlock(stepId = "planned_$idx", title = title, cmd = cmd)
+            },
+        )
+    }
+
+    fun clearWhiteBoxConsole() {
+        _consoleState.value = WhiteBoxConsoleState()
+    }
+
+    private fun onCoreRawLine(rawLine: String) {
+        _consoleState.update { WhiteBoxEventReducer.reduceRawLine(it, rawLine) }
+    }
+
+    fun setWhiteBoxRawJsonMode(showRaw: Boolean) {
+        _consoleState.update { it.copy(showRawJson = showRaw) }
     }
 
     fun refreshDevice() {
@@ -120,6 +146,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             val slotTag = slot?.trimStart('_')?.ifBlank { null } ?: _state.value.snapshot?.activeSlot?.trimStart('_') ?: "cur"
             val outDir = File(baseWorkDir, "backup_${slotTag}_${System.currentTimeMillis() / 1000}")
             val desc = if (partitions.isEmpty()) "全套 AVB 链分区" else "${partitions.size} 个选中分区"
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在备份槽位 _$slotTag 的$desc...", errorBanner = null) }
             val args = mutableListOf("backup-partitions", "--out-dir", outDir.absolutePath)
             if (!slot.isNullOrBlank()) {
@@ -133,6 +160,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 requireRoot = true,
                 onLog = ::appendLog,
                 onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess { elem ->
                 val manifest = runner.json.decodeFromJsonElement<BackupManifest>(elem)
@@ -300,6 +328,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             val outDir = File(baseWorkDir, "forged_${System.currentTimeMillis() / 1000}")
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在构建并全链验签自签名镜像包...", errorBanner = null) }
             runCatching {
                 vault.withTempPlaintextKey(key.id) { pemFile, _ ->
@@ -314,7 +343,12 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     if (!patchedInitBootPath.isNullOrBlank()) {
                         args += listOf("--patched-init-boot", patchedInitBootPath)
                     }
-                    runner.run(args = args, requireRoot = false, onLog = ::appendLog)
+                    runner.run(
+                        args = args,
+                        requireRoot = false,
+                        onLog = ::appendLog,
+                        onRawLine = ::onCoreRawLine,
+                    )
                 }
             }.onSuccess { result ->
                 result.onSuccess { elem ->
@@ -341,6 +375,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在写入自签名包并清缓存回读核验...", errorBanner = null) }
             val args = mutableListOf(
                 "flash-bundle",
@@ -355,6 +390,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 requireRoot = true,
                 onLog = ::appendLog,
                 onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess {
                 _state.update {
@@ -385,6 +421,9 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
+            prepareWhiteBoxConsole(
+                listOf("离线验签已有 GSI" to "avbforge-core avb verify --image ${File(imagePath).name}")
+            )
             _state.update {
                 it.copy(
                     busy = true,
@@ -401,6 +440,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 requireRoot = false,
                 timeoutSeconds = 600,
                 onLog = ::appendLog,
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess {
                 val sz = runCatching { File(imagePath).length() }.getOrDefault(0L)
@@ -443,6 +483,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 "正在解压/计算 Merkle Hashtree 并签名 GSI..."
             }
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = msg, errorBanner = null) }
             runCatching {
                 vault.withTempPlaintextKey(key.id) { pemFile, _ ->
@@ -458,6 +499,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         timeoutSeconds = 1800,
                         onLog = ::appendLog,
                         onProgress = { p -> _state.update { it.copy(progress = p) } },
+                        onRawLine = ::onCoreRawLine,
                     )
                 }
             }.onSuccess { result ->
@@ -489,6 +531,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun installSignedDsu(signedPath: String, userdataGiB: Int, singleBoot: Boolean) {
         val key = vault.getDefaultKey()
         viewModelScope.launch {
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在通过 gsi_tool 写入 DSU...", errorBanner = null) }
             val userdataBytes = userdataGiB.toLong() * 1024L * 1024L * 1024L
             val args = mutableListOf(
@@ -506,6 +549,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 timeoutSeconds = 1800,
                 onLog = ::appendLog,
                 onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess { elem ->
                 val st = elem.jsonObject["status"]?.jsonPrimitive?.content ?: "installed"
@@ -649,6 +693,16 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun rebootDevice() {
+        viewModelScope.launch {
+            _state.update { it.copy(busy = true, statusMessage = "正在执行安全重启...", errorBanner = null) }
+            val res = runner.run(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
+            res.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "重启失败：${err.message}") }
+            }
+        }
+    }
+
     fun runDsuSimple(action: String) {
         viewModelScope.launch {
             val label = when (action) {
@@ -682,12 +736,14 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             val ts = System.currentTimeMillis() / 1000
             val bkpFile = File(baseWorkDir, "init_boot_before_dsu_$ts.img")
             val outFile = File(baseWorkDir, "init_boot_dsu_ready_$ts.img")
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在备份当前 init_boot 并注入 DSU 公钥...", errorBanner = null) }
 
             val expRes = runner.run(
                 args = listOf("export-init-boot", "--output", bkpFile.absolutePath),
                 requireRoot = true,
                 onLog = ::appendLog,
+                onRawLine = ::onCoreRawLine,
             )
             if (expRes.isFailure) {
                 _state.update { it.copy(busy = false, errorBanner = "备份当前 init_boot 失败：${expRes.exceptionOrNull()?.message}") }
@@ -707,6 +763,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         ),
                         requireRoot = false,
                         onLog = ::appendLog,
+                        onRawLine = ::onCoreRawLine,
                     )
                 }
             }.onSuccess { res ->
@@ -733,6 +790,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             val ts = System.currentTimeMillis() / 1000
             val backupFile = File(baseWorkDir, "init_boot_live_backup_$ts.img")
             val cleanFile = File(baseWorkDir, "init_boot_clean_for_ksu_$ts.img")
+            prepareWhiteBoxConsole()
             _state.update {
                 it.copy(
                     busy = true,
@@ -749,6 +807,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 ),
                 requireRoot = true,
                 onLog = ::appendLog,
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess { elem ->
                 val rep = runner.json.decodeFromJsonElement<ExportCleanInitBootReport>(elem)
@@ -783,6 +842,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val ts = System.currentTimeMillis() / 1000
             val outFile = File(baseWorkDir, "init_boot_ksu_signed_$ts.img")
+            prepareWhiteBoxConsole()
             _state.update {
                 it.copy(
                     busy = true,
@@ -819,7 +879,12 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     if (!metaSource.isNullOrBlank()) {
                         args += listOf("--metadata-source", metaSource)
                     }
-                    runner.run(args = args, requireRoot = false, onLog = ::appendLog)
+                    runner.run(
+                        args = args,
+                        requireRoot = false,
+                        onLog = ::appendLog,
+                        onRawLine = ::onCoreRawLine,
+                    )
                 }
             }.onSuccess { res ->
                 res.onSuccess { elem ->
@@ -856,6 +921,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
+            prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在写入活动槽位 init_boot 并清缓存回读校验...", errorBanner = null) }
             val res = runner.run(
                 args = listOf(
@@ -867,6 +933,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 requireRoot = true,
                 onLog = ::appendLog,
                 onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
             )
             res.onSuccess {
                 _state.update {

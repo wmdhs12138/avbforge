@@ -32,7 +32,9 @@ pub fn emit_error(message: String) {
     let ev: CoreEvent<()> = CoreEvent::Error { message };
     eprintln!("{}", serde_json::to_string(&ev).unwrap());
 }
+
 pub mod whitebox {
+    use anyhow::Result;
     use serde::Serialize;
     use std::collections::BTreeMap;
     use std::io::{self, Write};
@@ -63,6 +65,21 @@ pub mod whitebox {
         pub cmd: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub target: Option<String>,
+    }
+
+    impl PlannedStep {
+        pub fn new(
+            step_id: impl Into<String>,
+            title: impl Into<String>,
+            cmd: impl Into<String>,
+        ) -> Self {
+            Self {
+                step_id: step_id.into(),
+                title: title.into(),
+                cmd: cmd.into(),
+                target: None,
+            }
+        }
     }
 
     #[derive(Debug, Serialize)]
@@ -109,6 +126,32 @@ pub mod whitebox {
         emit_whitebox(&WhiteBoxEvent::Plan { steps });
     }
 
+    /// Execute a closure inside a white-box `StepGuard`, automatically emitting `step_start` and
+    /// `step_end` (with exit code 0 on `Ok` or exit code 1 + formatted error chain on `Err`).
+    pub fn run_step<T, F>(
+        step_id: impl Into<String>,
+        title: impl Into<String>,
+        cmd: impl Into<String>,
+        gate: Option<GateKind>,
+        ok_summary: &str,
+        f: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(&StepGuard) -> Result<T>,
+    {
+        let guard = StepGuard::begin(step_id, title, cmd, gate);
+        match f(&guard) {
+            Ok(val) => {
+                guard.finish_ok(Some(ok_summary));
+                Ok(val)
+            }
+            Err(err) => {
+                guard.finish_err(1, format!("{err:#}"));
+                Err(err)
+            }
+        }
+    }
+
     pub struct StepGuard {
         step_id: String,
         gate: Option<GateKind>,
@@ -144,6 +187,10 @@ pub mod whitebox {
 
         pub fn ok_line(&self, message: impl Into<String>) {
             self.log(StepLogLevel::Ok, message, BTreeMap::new());
+        }
+
+        pub fn warn(&self, message: impl Into<String>) {
+            self.log(StepLogLevel::Warn, message, BTreeMap::new());
         }
 
         pub fn kv(&self, message: impl Into<String>, pairs: &[(&str, &str)]) {
@@ -220,6 +267,34 @@ pub mod whitebox {
             let json = serde_json::to_string(&ev).unwrap();
             assert!(json.contains("\"event\":\"step_start\""));
             assert!(json.contains("\"gate\":\"readback_verify\""));
+        }
+
+        #[test]
+        fn run_step_propagates_ok_and_err() {
+            let ok_val: i32 = run_step(
+                "unit_ok",
+                "Unit ok",
+                "avbforge-core test-ok",
+                Some(GateKind::OfflineVerify),
+                "PASS",
+                |step| {
+                    step.kv("check", &[("result", "ok")]);
+                    step.ok_line("passed");
+                    Ok(42)
+                },
+            )
+            .unwrap();
+            assert_eq!(ok_val, 42);
+
+            let err: Result<()> = run_step(
+                "unit_err",
+                "Unit err",
+                "avbforge-core test-err",
+                Some(GateKind::ReadbackVerify),
+                "PASS",
+                |_step| anyhow::bail!("simulated mismatch"),
+            );
+            assert!(err.is_err());
         }
     }
 }

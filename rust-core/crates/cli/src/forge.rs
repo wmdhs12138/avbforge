@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::device::{sha256_file, STANDARD_BOOT_PARTITIONS};
+use crate::events::whitebox::{emit_plan, run_step, GateKind, PlannedStep};
 use crate::events::{emit_log, emit_progress};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +88,52 @@ pub fn patch_dsu_key(
     metadata_source_img: Option<&Path>,
     inject_dsu_key: bool,
 ) -> Result<PatchDsuKeyReport> {
+    patch_dsu_key_inner(
+        input_img,
+        output_img,
+        key_pem,
+        passphrase,
+        partition_name,
+        target_key_name,
+        metadata_source_img,
+        inject_dsu_key,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn patch_dsu_key_inner(
+    input_img: &Path,
+    output_img: &Path,
+    key_pem: &Path,
+    passphrase: Option<&str>,
+    partition_name: &str,
+    target_key_name: &str,
+    metadata_source_img: Option<&Path>,
+    inject_dsu_key: bool,
+    emit_step_plan: bool,
+) -> Result<PatchDsuKeyReport> {
+    if emit_step_plan {
+        emit_plan(vec![
+            PlannedStep::new(
+                "cpio_patch",
+                if inject_dsu_key {
+                    format!("解包 {partition_name} Ramdisk 并注入 DSU 公钥")
+                } else {
+                    format!("解析 {partition_name} 镜像与 AVB 元数据")
+                },
+                format!(
+                    "avbforge-core patch-dsu-key --partition-name {partition_name} --inject-dsu-key {inject_dsu_key}"
+                ),
+            ),
+            PlannedStep::new(
+                "avb_sign_verify",
+                format!("AVB 签名与离线回环验签 ({partition_name})"),
+                format!("avbforge-core avb add-hash-footer --partition-name {partition_name} --verify-offline"),
+            ),
+        ]);
+    }
+
     let priv_key = AvbPrivateKey::from_pem_file(key_pem, passphrase)?;
     let pub_key = priv_key.public_key()?;
     let alg = priv_key.default_algorithm()?;
@@ -114,86 +161,158 @@ pub fn patch_dsu_key(
         })
         .unwrap_or_default();
 
-    // Load raw unsigned boot bytes from input_img
-    let in_bytes = fs::read(input_img)?;
-    let raw_slice = match load_avb_image(input_img) {
-        Ok(loaded) => match loaded.footer {
-            Some(f) => &in_bytes[..f.original_image_size as usize],
-            None => &in_bytes[..],
-        },
-        Err(_) => &in_bytes[..],
-    };
+    let (fmt, injected_paths, repacked) = if emit_step_plan {
+        run_step(
+            "cpio_patch",
+            if inject_dsu_key {
+                format!("解包 {partition_name} Ramdisk 并注入 DSU 公钥")
+            } else {
+                format!("解析 {partition_name} 镜像与 AVB 元数据")
+            },
+            format!(
+                "avbforge-core patch-dsu-key --partition-name {partition_name} --inject-dsu-key {inject_dsu_key}"
+            ),
+            None,
+            if inject_dsu_key { "INJECTED" } else { "PARSED" },
+            |step| {
+                let in_bytes = fs::read(input_img)?;
+                let raw_slice = match load_avb_image(input_img) {
+                    Ok(loaded) => match loaded.footer {
+                        Some(f) => &in_bytes[..f.original_image_size as usize],
+                        None => &in_bytes[..],
+                    },
+                    Err(_) => &in_bytes[..],
+                };
 
-    let boot = BootImageV3V4::parse(raw_slice)?;
-    let (fmt, mut cpio) = boot.unpack_ramdisk()?;
-
-    let mut injected_paths = Vec::new();
-    let repacked = if inject_dsu_key {
-        // Inject into both `first_stage_ramdisk/avb/<name>` and `avb/<name>` (covers force_normal_boot & direct rootfs)
-        let key_basename = target_key_name.trim_start_matches('/').trim_start_matches("avb/");
-        let path1 = format!("first_stage_ramdisk/avb/{key_basename}");
-        let path2 = format!("avb/{key_basename}");
-        cpio.upsert_file(&path1, 0o100644, pub_key.raw_avb_key.clone());
-        cpio.upsert_file(&path2, 0o100644, pub_key.raw_avb_key.clone());
-        injected_paths.push(path1);
-        injected_paths.push(path2);
-        boot.repack_with_ramdisk(fmt, &cpio)?
+                let boot = BootImageV3V4::parse(raw_slice)?;
+                let (fmt, mut cpio) = boot.unpack_ramdisk()?;
+                let mut injected_paths = Vec::new();
+                let repacked = if inject_dsu_key {
+                    let key_basename = target_key_name.trim_start_matches('/').trim_start_matches("avb/");
+                    let path1 = format!("first_stage_ramdisk/avb/{key_basename}");
+                    let path2 = format!("avb/{key_basename}");
+                    cpio.upsert_file(&path1, 0o100644, pub_key.raw_avb_key.clone());
+                    cpio.upsert_file(&path2, 0o100644, pub_key.raw_avb_key.clone());
+                    injected_paths.push(path1);
+                    injected_paths.push(path2);
+                    boot.repack_with_ramdisk(fmt, &cpio)?
+                } else {
+                    raw_slice.to_vec()
+                };
+                step.kv(
+                    "ramdisk processed",
+                    &[
+                        ("compression", &format!("{fmt:?}")),
+                        ("partition_size", &partition_size.to_string()),
+                        ("injected_count", &injected_paths.len().to_string()),
+                    ],
+                );
+                Ok((fmt, injected_paths, repacked))
+            },
+        )?
     } else {
-        raw_slice.to_vec()
+        let in_bytes = fs::read(input_img)?;
+        let raw_slice = match load_avb_image(input_img) {
+            Ok(loaded) => match loaded.footer {
+                Some(f) => &in_bytes[..f.original_image_size as usize],
+                None => &in_bytes[..],
+            },
+            Err(_) => &in_bytes[..],
+        };
+        let boot = BootImageV3V4::parse(raw_slice)?;
+        let (fmt, mut cpio) = boot.unpack_ramdisk()?;
+        let mut injected_paths = Vec::new();
+        let repacked = if inject_dsu_key {
+            let key_basename = target_key_name.trim_start_matches('/').trim_start_matches("avb/");
+            let path1 = format!("first_stage_ramdisk/avb/{key_basename}");
+            let path2 = format!("avb/{key_basename}");
+            cpio.upsert_file(&path1, 0o100644, pub_key.raw_avb_key.clone());
+            cpio.upsert_file(&path2, 0o100644, pub_key.raw_avb_key.clone());
+            injected_paths.push(path1);
+            injected_paths.push(path2);
+            boot.repack_with_ramdisk(fmt, &cpio)?
+        } else {
+            raw_slice.to_vec()
+        };
+        (fmt, injected_paths, repacked)
     };
 
     if let Some(parent) = output_img.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Stage in tempdir with canonical `<partition_name>.img` name for verify_image
-    let tmp_dir = tempfile::tempdir()?;
-    let staged = tmp_dir.path().join(format!("{partition_name}.img"));
-    fs::write(&staged, &repacked)?;
+    let sign_and_verify = |step: Option<&crate::events::whitebox::StepGuard>| -> Result<PatchDsuKeyReport> {
+        let tmp_dir = tempfile::tempdir()?;
+        let staged = tmp_dir.path().join(format!("{partition_name}.img"));
+        fs::write(&staged, &repacked)?;
 
-    add_hash_footer(
-        &staged,
-        HashFooterOptions {
-            partition_name,
-            partition_size,
-            algorithm: alg,
-            key: Some(&priv_key),
-            salt: None,
-            rollback_index,
-            flags,
-            props,
-            release_string: None,
-        },
-    )?;
+        add_hash_footer(
+            &staged,
+            HashFooterOptions {
+                partition_name,
+                partition_size,
+                algorithm: alg,
+                key: Some(&priv_key),
+                salt: None,
+                rollback_index,
+                flags,
+                props,
+                release_string: None,
+            },
+        )?;
 
-    // Mandatory offline verification + round-trip ramdisk integrity check
-    verify_image(&staged, Some(&pub_key.raw_avb_key), false, None, true)?;
-    let out_bytes = fs::read(&staged)?;
-    let loaded_out = load_avb_image(&staged)?;
-    let raw_out = &out_bytes[..loaded_out.footer.unwrap().original_image_size as usize];
-    let re_boot = BootImageV3V4::parse(raw_out)?;
-    let re_info = re_boot.inspect()?;
-    if inject_dsu_key {
-        let (_, re_cpio) = re_boot.unpack_ramdisk()?;
-        for p in &injected_paths {
-            if re_cpio.get(p).map(|e| e.data.as_slice()) != Some(pub_key.raw_avb_key.as_slice()) {
-                bail!("Round-trip verification failed: injected avbpubkey mismatch at {p}");
+        // Mandatory offline verification + round-trip ramdisk integrity check
+        verify_image(&staged, Some(&pub_key.raw_avb_key), false, None, true)?;
+        let out_bytes = fs::read(&staged)?;
+        let loaded_out = load_avb_image(&staged)?;
+        let raw_out = &out_bytes[..loaded_out.footer.unwrap().original_image_size as usize];
+        let re_boot = BootImageV3V4::parse(raw_out)?;
+        let re_info = re_boot.inspect()?;
+        if inject_dsu_key {
+            let (_, re_cpio) = re_boot.unpack_ramdisk()?;
+            for p in &injected_paths {
+                if re_cpio.get(p).map(|e| e.data.as_slice()) != Some(pub_key.raw_avb_key.as_slice()) {
+                    bail!("Round-trip verification failed: injected avbpubkey mismatch at {p}");
+                }
             }
         }
+
+        fs::copy(&staged, output_img)?;
+        let sha256 = sha256_file(output_img)?;
+        if let Some(s) = step {
+            s.kv(
+                "signed & verified",
+                &[
+                    ("algorithm", alg.as_str()),
+                    ("has_kernelsu", &re_info.has_kernelsu.to_string()),
+                    ("sha256", &sha256),
+                ],
+            );
+            s.ok_line("offline AVB & ramdisk round-trip verify passed");
+        }
+        Ok(PatchDsuKeyReport {
+            output_path: output_img.display().to_string(),
+            size: out_bytes.len() as u64,
+            sha256,
+            ramdisk_compression: fmt,
+            injected_paths,
+            has_kernelsu: re_info.has_kernelsu,
+            avb_pubkey_sha1: pub_key.sha1_hex(),
+        })
+    };
+
+    if emit_step_plan {
+        run_step(
+            "avb_sign_verify",
+            format!("AVB 签名与离线回环验签 ({partition_name})"),
+            format!("avbforge-core avb add-hash-footer --partition-name {partition_name} --verify-offline"),
+            Some(GateKind::OfflineVerify),
+            "PASS",
+            |step| sign_and_verify(Some(step)),
+        )
+    } else {
+        sign_and_verify(None)
     }
-
-    fs::copy(&staged, output_img)?;
-    let sha256 = sha256_file(output_img)?;
-
-    Ok(PatchDsuKeyReport {
-        output_path: output_img.display().to_string(),
-        size: out_bytes.len() as u64,
-        sha256,
-        ramdisk_compression: fmt,
-        injected_paths,
-        has_kernelsu: re_info.has_kernelsu,
-        avb_pubkey_sha1: pub_key.sha1_hex(),
-    })
 }
 
 /// Forge a complete self-signed partition bundle from stock backup + optional user-patched KSU init_boot + optional DSU key injection.
@@ -218,104 +337,181 @@ pub fn forge_bundle(
     }
     let orig_vbmeta = load_avb_image(&orig_vbmeta_path)?;
     let vbmeta_padding = fs::metadata(&orig_vbmeta_path)?.len() as usize;
+    let stock_vbmeta_sys = stock_dir.join("vbmeta_system.img");
+
+    let mut plan_steps = vec![PlannedStep::new(
+        "forge_partitions",
+        "重签引导分区镜像并处理 init_boot",
+        format!("avbforge-core forge-bundle --stock-dir {} --inject-dsu-key {inject_dsu_key}", stock_dir.display()),
+    )];
+    if stock_vbmeta_sys.exists() {
+        plan_steps.push(PlannedStep::new(
+            "forge_vbmeta_system",
+            "重签 vbmeta_system（保留原厂逻辑分区 Hashtree）",
+            "avbforge-core avb resign-vbmeta-system --preserve-descriptors",
+        ));
+    }
+    plan_steps.push(PlannedStep::new(
+        "forge_vbmeta",
+        "重建顶层 vbmeta.img 信任链公钥",
+        "avbforge-core avb make-vbmeta --replace-chain-pubkeys",
+    ));
+    plan_steps.push(PlannedStep::new(
+        "verify_bundle_chain",
+        "全链离线验签自签名镜像包",
+        format!("avbforge-core avb verify --image {} --follow-chain", output_dir.join("vbmeta.img").display()),
+    ));
+    emit_plan(plan_steps);
 
     let mut signed_partitions = Vec::new();
     let mut init_boot_has_ksu = false;
 
     // 1. Re-sign all hash-footer boot partitions present in stock_dir
-    for &part in STANDARD_BOOT_PARTITIONS {
-        if part == "vbmeta" || part == "vbmeta_system" {
-            continue;
-        }
-        let stock_img = stock_dir.join(format!("{part}.img"));
-        if !stock_img.exists() {
-            continue;
-        }
-        let out_img = output_dir.join(format!("{part}.img"));
-        emit_log("info", &format!("Processing partition: {part}"));
+    run_step(
+        "forge_partitions",
+        "重签引导分区镜像并处理 init_boot",
+        format!("avbforge-core forge-bundle --stock-dir {} --inject-dsu-key {inject_dsu_key}", stock_dir.display()),
+        None,
+        "SIGNED",
+        |step| {
+            for &part in STANDARD_BOOT_PARTITIONS {
+                if part == "vbmeta" || part == "vbmeta_system" {
+                    continue;
+                }
+                let stock_img = stock_dir.join(format!("{part}.img"));
+                if !stock_img.exists() {
+                    continue;
+                }
+                let out_img = output_dir.join(format!("{part}.img"));
+                emit_log("info", &format!("Processing partition: {part}"));
 
-        if part == "init_boot" {
-            let src_for_init_boot = patched_init_boot.unwrap_or(&stock_img);
-            if inject_dsu_key {
-                let rep = patch_dsu_key(
-                    src_for_init_boot,
-                    &out_img,
-                    key_pem,
-                    passphrase,
-                    "init_boot",
-                    dsu_key_name,
-                    Some(&stock_img),
-                    true,
-                )?;
-                init_boot_has_ksu = rep.has_kernelsu;
-            } else {
-                resign_hash_partition(src_for_init_boot, Some(&stock_img), &out_img, part, &priv_key, alg)?;
-                let loaded = load_avb_image(&out_img)?;
-                let bytes = fs::read(&out_img)?;
-                if let Some(f) = loaded.footer {
-                    if let Ok(b) = BootImageV3V4::parse(&bytes[..f.original_image_size as usize]) {
-                        if let Ok(i) = b.inspect() {
-                            init_boot_has_ksu = i.has_kernelsu;
+                if part == "init_boot" {
+                    let src_for_init_boot = patched_init_boot.unwrap_or(&stock_img);
+                    if inject_dsu_key {
+                        let rep = patch_dsu_key_inner(
+                            src_for_init_boot,
+                            &out_img,
+                            key_pem,
+                            passphrase,
+                            "init_boot",
+                            dsu_key_name,
+                            Some(&stock_img),
+                            true,
+                            false,
+                        )?;
+                        init_boot_has_ksu = rep.has_kernelsu;
+                    } else {
+                        resign_hash_partition(src_for_init_boot, Some(&stock_img), &out_img, part, &priv_key, alg)?;
+                        let loaded = load_avb_image(&out_img)?;
+                        let bytes = fs::read(&out_img)?;
+                        if let Some(f) = loaded.footer {
+                            if let Ok(b) = BootImageV3V4::parse(&bytes[..f.original_image_size as usize]) {
+                                if let Ok(i) = b.inspect() {
+                                    init_boot_has_ksu = i.has_kernelsu;
+                                }
+                            }
                         }
                     }
+                } else {
+                    resign_hash_partition(&stock_img, Some(&stock_img), &out_img, part, &priv_key, alg)?;
                 }
+                step.kv("signed partition", &[("partition", part), ("algorithm", alg.as_str())]);
+                signed_partitions.push(part.to_string());
             }
-        } else {
-            resign_hash_partition(&stock_img, Some(&stock_img), &out_img, part, &priv_key, alg)?;
-        }
-        signed_partitions.push(part.to_string());
-    }
+            step.ok_line(format!("{} boot partition(s) signed", signed_partitions.len()));
+            Ok(())
+        },
+    )?;
 
     // 2. Re-sign vbmeta_system preserving all original descriptors (odm/product/system/system_ext/vendor/dlkm!)
-    let stock_vbmeta_sys = stock_dir.join("vbmeta_system.img");
     if stock_vbmeta_sys.exists() {
-        emit_log("info", "Re-signing vbmeta_system.img (preserving all logical partition hashtrees)");
-        let loaded_sys = load_avb_image(&stock_vbmeta_sys)?;
-        let sys_pad = fs::metadata(&stock_vbmeta_sys)?.len() as usize;
-        let out_sys = output_dir.join("vbmeta_system.img");
-        make_vbmeta_image(
-            &out_sys,
-            loaded_sys.vbmeta.descriptors,
-            alg,
-            Some(&priv_key),
-            loaded_sys.vbmeta.rollback_index,
-            loaded_sys.vbmeta.flags,
-            sys_pad,
+        run_step(
+            "forge_vbmeta_system",
+            "重签 vbmeta_system（保留原厂逻辑分区 Hashtree）",
+            "avbforge-core avb resign-vbmeta-system --preserve-descriptors",
             None,
+            "SIGNED",
+            |step| {
+                emit_log("info", "Re-signing vbmeta_system.img (preserving all logical partition hashtrees)");
+                let loaded_sys = load_avb_image(&stock_vbmeta_sys)?;
+                let desc_count = loaded_sys.vbmeta.descriptors.len();
+                let sys_pad = fs::metadata(&stock_vbmeta_sys)?.len() as usize;
+                let out_sys = output_dir.join("vbmeta_system.img");
+                make_vbmeta_image(
+                    &out_sys,
+                    loaded_sys.vbmeta.descriptors,
+                    alg,
+                    Some(&priv_key),
+                    loaded_sys.vbmeta.rollback_index,
+                    loaded_sys.vbmeta.flags,
+                    sys_pad,
+                    None,
+                )?;
+                step.kv("vbmeta_system", &[("descriptors", &desc_count.to_string()), ("padding", &sys_pad.to_string())]);
+                signed_partitions.push("vbmeta_system".to_string());
+                Ok(())
+            },
         )?;
-        signed_partitions.push("vbmeta_system".to_string());
     }
 
     // 3. Rebuild top-level vbmeta.img replacing chain descriptor pubkeys with our custom pubkey
-    let mut new_vbmeta_descs = Vec::new();
-    for d in orig_vbmeta.vbmeta.descriptors {
-        match d {
-            AvbDescriptor::ChainPartition(mut cp) => {
-                if output_dir.join(format!("{}.img", cp.partition_name)).exists() {
-                    cp.public_key = pub_key.raw_avb_key.clone();
-                }
-                new_vbmeta_descs.push(AvbDescriptor::ChainPartition(cp));
-            }
-            other => new_vbmeta_descs.push(other),
-        }
-    }
     let out_vbmeta = output_dir.join("vbmeta.img");
-    make_vbmeta_image(
-        &out_vbmeta,
-        new_vbmeta_descs,
-        alg,
-        Some(&priv_key),
-        orig_vbmeta.vbmeta.rollback_index,
-        orig_vbmeta.vbmeta.flags,
-        vbmeta_padding,
+    run_step(
+        "forge_vbmeta",
+        "重建顶层 vbmeta.img 信任链公钥",
+        "avbforge-core avb make-vbmeta --replace-chain-pubkeys",
         None,
+        "REBUILT",
+        |step| {
+            let mut new_vbmeta_descs = Vec::new();
+            let mut replaced_chains = 0usize;
+            for d in orig_vbmeta.vbmeta.descriptors {
+                match d {
+                    AvbDescriptor::ChainPartition(mut cp) => {
+                        if output_dir.join(format!("{}.img", cp.partition_name)).exists() {
+                            cp.public_key = pub_key.raw_avb_key.clone();
+                            replaced_chains += 1;
+                        }
+                        new_vbmeta_descs.push(AvbDescriptor::ChainPartition(cp));
+                    }
+                    other => new_vbmeta_descs.push(other),
+                }
+            }
+            make_vbmeta_image(
+                &out_vbmeta,
+                new_vbmeta_descs,
+                alg,
+                Some(&priv_key),
+                orig_vbmeta.vbmeta.rollback_index,
+                orig_vbmeta.vbmeta.flags,
+                vbmeta_padding,
+                None,
+            )?;
+            step.kv(
+                "vbmeta rebuilt",
+                &[("chains_updated", &replaced_chains.to_string()), ("pubkey_sha1", &pub_key.sha1_hex())],
+            );
+            signed_partitions.push("vbmeta".to_string());
+            Ok(())
+        },
     )?;
-    signed_partitions.push("vbmeta".to_string());
 
     // 4. Mandatory full-chain verification!
-    emit_log("info", "Running full-chain AVB verification on forged bundle...");
-    let verified = verify_image(&out_vbmeta, Some(&pub_key.raw_avb_key), true, None, true)
-        .context("Forged bundle failed full-chain AVB verification")?;
+    let verified = run_step(
+        "verify_bundle_chain",
+        "全链离线验签自签名镜像包",
+        format!("avbforge-core avb verify --image {} --follow-chain", out_vbmeta.display()),
+        Some(GateKind::OfflineVerify),
+        "CHAIN_PASS",
+        |step| {
+            emit_log("info", "Running full-chain AVB verification on forged bundle...");
+            let verified = verify_image(&out_vbmeta, Some(&pub_key.raw_avb_key), true, None, true)
+                .context("Forged bundle failed full-chain AVB verification")?;
+            step.kv("chain_verified", &[("images", &verified.len().to_string())]);
+            step.ok_line("full-chain offline AVB verification passed");
+            Ok(verified)
+        },
+    )?;
 
     Ok(ForgeBundleReport {
         output_dir: output_dir.display().to_string(),
@@ -394,47 +590,100 @@ pub fn sign_gsi(
     let tmp_dir = tempfile::tempdir_in(output_path.parent().unwrap_or_else(|| Path::new(".")))?;
     let work_img = tmp_dir.path().join("system.img");
 
-    // Step 1: stream decompress (.img / .gz / .xz)
-    emit_log("info", &format!("Preparing GSI from {}...", input_path.display()));
-    let fmt = stream_decompress_file(input_path, &work_img, |bytes| {
-        emit_progress("decompress", bytes, 0);
-    })?;
-    emit_log("info", &format!("Input compression detected: {fmt:?}"));
-
-    // Step 2: unsparse if Android sparse image
-    if is_sparse_image(&work_img)? {
-        emit_log("info", "Detected Android sparse image, converting to raw...");
-        let raw_img = tmp_dir.path().join("system_raw.img");
-        unsparse_image(&work_img, &raw_img, |cur, tot| {
-            emit_progress("unsparse", cur, tot);
-        })?;
-        fs::rename(&raw_img, &work_img)?;
+    let mut plan_steps = vec![PlannedStep::new(
+        "gsi_prepare",
+        "流式解压 / 展开 Sparse 并清理旧 AVB Footer",
+        format!("avbforge-core gsi prepare --input {}", input_path.display()),
+    )];
+    if fix_vendor_genfs {
+        plan_steps.push(PlannedStep::new(
+            "gsi_selinux_fix",
+            "检测并修复 SELinux genfscon 冲突",
+            "avbforge-core gsi fix-vendor-genfs --host /vendor/etc/selinux/vendor_sepolicy.cil",
+        ));
     }
+    plan_steps.push(PlannedStep::new(
+        "gsi_hashtree_sign",
+        "计算 Merkle Hashtree 并签发 AVB Footer",
+        format!("avbforge-core avb add-hashtree-footer --partition-name system --algorithm {}", alg.as_str()),
+    ));
+    plan_steps.push(PlannedStep::new(
+        "gsi_verify",
+        "离线全树验签 GSI",
+        format!("avbforge-core avb verify --image {}", output_path.display()),
+    ));
+    emit_plan(plan_steps);
 
-    // Step 3: preserve useful AVB properties (especially security_patch) before erasing old footer
-    let mut orig_spl: Option<String> = None;
-    let mut orig_os_ver: Option<String> = None;
-    if let Ok(loaded) = load_avb_image(&work_img) {
-        for d in &loaded.vbmeta.descriptors {
-            if let AvbDescriptor::Property(p) = d {
-                if p.key == "com.android.build.system.security_patch" && !p.value.is_empty() {
-                    orig_spl = Some(p.value.clone());
-                } else if p.key == "com.android.build.system.os_version" && !p.value.is_empty() {
-                    orig_os_ver = Some(p.value.clone());
+    // Step 1-3: stream decompress, unsparse, extract properties & strip old footer
+    let (orig_spl, orig_os_ver) = run_step(
+        "gsi_prepare",
+        "流式解压 / 展开 Sparse 并清理旧 AVB Footer",
+        format!("avbforge-core gsi prepare --input {}", input_path.display()),
+        None,
+        "READY",
+        |step| {
+            emit_log("info", &format!("Preparing GSI from {}...", input_path.display()));
+            let fmt = stream_decompress_file(input_path, &work_img, |bytes| {
+                emit_progress("decompress", bytes, 0);
+            })?;
+            emit_log("info", &format!("Input compression detected: {fmt:?}"));
+
+            let mut was_sparse = false;
+            if is_sparse_image(&work_img)? {
+                was_sparse = true;
+                emit_log("info", "Detected Android sparse image, converting to raw...");
+                let raw_img = tmp_dir.path().join("system_raw.img");
+                unsparse_image(&work_img, &raw_img, |cur, tot| {
+                    emit_progress("unsparse", cur, tot);
+                })?;
+                fs::rename(&raw_img, &work_img)?;
+            }
+
+            let mut orig_spl: Option<String> = None;
+            let mut orig_os_ver: Option<String> = None;
+            if let Ok(loaded) = load_avb_image(&work_img) {
+                for d in &loaded.vbmeta.descriptors {
+                    if let AvbDescriptor::Property(p) = d {
+                        if p.key == "com.android.build.system.security_patch" && !p.value.is_empty() {
+                            orig_spl = Some(p.value.clone());
+                        } else if p.key == "com.android.build.system.os_version" && !p.value.is_empty() {
+                            orig_os_ver = Some(p.value.clone());
+                        }
+                    }
                 }
             }
-        }
-    }
 
-    if erase_footer(&work_img)? {
-        emit_log("info", "Stripped pre-existing AVB footer from GSI.");
-    }
+            let stripped = erase_footer(&work_img)?;
+            if stripped {
+                emit_log("info", "Stripped pre-existing AVB footer from GSI.");
+            }
+            step.kv(
+                "gsi prepared",
+                &[
+                    ("compression", &format!("{fmt:?}")),
+                    ("sparse", &was_sparse.to_string()),
+                    ("footer_stripped", &stripped.to_string()),
+                ],
+            );
+            Ok((orig_spl, orig_os_ver))
+        },
+    )?;
 
     // Step 3.5: optionally auto-detect & strip conflicting `plat_sepolicy_genfs_*.cil` rules
-    // against host Vendor 33 `vendor_sepolicy.cil` (fixes Android 15/16/17 GSI secilc boot failures!)
     let genfs_conflicts_patched = if fix_vendor_genfs {
-        let short_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-        patch_gsi_vendor_genfs_conflicts(&work_img, short_parent)?
+        run_step(
+            "gsi_selinux_fix",
+            "检测并修复 SELinux genfscon 冲突",
+            "avbforge-core gsi fix-vendor-genfs --host /vendor/etc/selinux/vendor_sepolicy.cil",
+            None,
+            "CHECKED",
+            |step| {
+                let short_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+                let patched = patch_gsi_vendor_genfs_conflicts(&work_img, short_parent)?;
+                step.kv("genfscon scan", &[("conflicts_patched", &patched.to_string())]);
+                Ok(patched)
+            },
+        )?
     } else {
         0
     };
@@ -463,33 +712,62 @@ pub fn sign_gsi(
     if let Some(osv) = orig_os_ver {
         props.push(("com.android.build.system.os_version".to_string(), osv));
     }
-    emit_log(
-        "info",
-        &format!("Embedding AVB security_patch={effective_spl} (host={host_spl}) for locked DSU anti-rollback check."),
-    );
 
     // Step 4: compute Merkle hashtree & sign
-    emit_log("info", &format!("Computing SHA-256 hashtree & signing ({})...", alg.as_str()));
-    let (footer, ht_desc) = add_hashtree_footer(
-        &work_img,
-        HashtreeFooterOptions {
-            partition_name: "system",
-            partition_size,
-            algorithm: alg,
-            key: Some(&priv_key),
-            salt: None,
-            rollback_index: 0,
-            flags: 0,
-            props,
-            release_string: None,
-            block_size: 4096,
+    let (footer, ht_desc) = run_step(
+        "gsi_hashtree_sign",
+        "计算 Merkle Hashtree 并签发 AVB Footer",
+        format!("avbforge-core avb add-hashtree-footer --partition-name system --algorithm {}", alg.as_str()),
+        None,
+        "SIGNED",
+        |step| {
+            emit_log(
+                "info",
+                &format!("Embedding AVB security_patch={effective_spl} (host={host_spl}) for locked DSU anti-rollback check."),
+            );
+            emit_log("info", &format!("Computing SHA-256 hashtree & signing ({})...", alg.as_str()));
+            let (footer, ht_desc) = add_hashtree_footer(
+                &work_img,
+                HashtreeFooterOptions {
+                    partition_name: "system",
+                    partition_size,
+                    algorithm: alg,
+                    key: Some(&priv_key),
+                    salt: None,
+                    rollback_index: 0,
+                    flags: 0,
+                    props,
+                    release_string: None,
+                    block_size: 4096,
+                },
+                |cur, tot| emit_progress("hashtree", cur, tot),
+            )?;
+            step.kv(
+                "hashtree signed",
+                &[
+                    ("security_patch", &effective_spl),
+                    ("tree_bytes", &ht_desc.tree_size.to_string()),
+                    ("root_digest", &hex::encode(&ht_desc.root_digest)),
+                ],
+            );
+            Ok((footer, ht_desc))
         },
-        |cur, tot| emit_progress("hashtree", cur, tot),
     )?;
 
     // Step 5: verify generated GSI image
-    emit_log("info", "Verifying signed GSI AVB footer & hashtree...");
-    verify_image(&work_img, Some(&pub_key.raw_avb_key), false, None, false)?;
+    run_step(
+        "gsi_verify",
+        "离线全树验签 GSI",
+        format!("avbforge-core avb verify --image {}", output_path.display()),
+        Some(GateKind::OfflineVerify),
+        "PASS",
+        |step| {
+            emit_log("info", "Verifying signed GSI AVB footer & hashtree...");
+            verify_image(&work_img, Some(&pub_key.raw_avb_key), false, None, false)?;
+            step.ok_line("GSI AVB footer & Merkle hashtree verified");
+            Ok(())
+        },
+    )?;
 
     fs::rename(&work_img, output_path).or_else(|_| -> Result<()> {
         fs::copy(&work_img, output_path)?;
@@ -916,12 +1194,53 @@ pub fn dsu_install(
     single_boot: bool,
     expected_pubkey_path: Option<&Path>,
 ) -> Result<String> {
-    if let Some(pk_path) = expected_pubkey_path {
-        let pk = fs::read(pk_path)?;
-        verify_image(signed_gsi_path, Some(&pk), false, None, false)
-            .context("Refusing DSU install: GSI failed AVB verification against selected key")?;
-    }
     let gsi_size = fs::metadata(signed_gsi_path)?.len();
+    let en_cmd = if single_boot { "gsi_tool enable -s && gsi_tool status" } else { "gsi_tool enable && gsi_tool status" };
+
+    let mut plan_steps = Vec::new();
+    if expected_pubkey_path.is_some() {
+        plan_steps.push(PlannedStep::new(
+            "dsu_verify_gsi",
+            "安装前离线验签 GSI 镜像",
+            format!("avbforge-core avb verify --image {}", signed_gsi_path.display()),
+        ));
+    }
+    plan_steps.push(PlannedStep::new(
+        "dsu_stage",
+        "暂存镜像到 /data/gsi（适配 SELinux）",
+        format!("avbforge-core dsu stage --bytes {gsi_size}"),
+    ));
+    plan_steps.push(PlannedStep::new(
+        "dsu_gsi_install",
+        "通过原生 gsi_tool 写入 DSU 分区",
+        format!(
+            "gsi_tool install --gsi-size {gsi_size} --userdata-size {userdata_size_bytes} --wipe --no-reboot"
+        ),
+    ));
+    plan_steps.push(PlannedStep::new(
+        "dsu_enable_verify",
+        "启用 DSU 并回读 gsi_tool 状态",
+        en_cmd,
+    ));
+    emit_plan(plan_steps);
+
+    if let Some(pk_path) = expected_pubkey_path {
+        run_step(
+            "dsu_verify_gsi",
+            "安装前离线验签 GSI 镜像",
+            format!("avbforge-core avb verify --image {}", signed_gsi_path.display()),
+            Some(GateKind::OfflineVerify),
+            "PASS",
+            |step| {
+                let pk = fs::read(pk_path)?;
+                verify_image(signed_gsi_path, Some(&pk), false, None, false)
+                    .context("Refusing DSU install: GSI failed AVB verification against selected key")?;
+                step.kv("gsi_verified", &[("bytes", &gsi_size.to_string())]);
+                step.ok_line("GSI AVB signature matches selected key");
+                Ok(())
+            },
+        )?;
+    }
 
     // Clean up any stale/partial previous DSU state before installing
     let _ = Command::new("/system/bin/gsi_tool").arg("wipe").output();
@@ -930,85 +1249,127 @@ pub fn dsu_install(
     // while explicitly allowing gsi_data_file under /data/gsi/. Stage into /data/gsi/ and
     // auto-clean via TempFileGuard so gsid reads a properly-labeled gsi_data_file descriptor.
     let mut stage_guard = TempFileGuard(None);
-    let feed_path: PathBuf = if signed_gsi_path.starts_with("/data/gsi") {
-        signed_gsi_path.to_path_buf()
-    } else if Path::new("/data/gsi").is_dir() {
-        let staged = PathBuf::from(format!("/data/gsi/.avbforge_stage_{}.img", std::process::id()));
-        emit_log(
-            "info",
-            &format!("Staging signed GSI into /data/gsi/ for gsid ({gsi_size} B)..."),
-        );
-        stage_guard.0 = Some(staged.clone());
-        let mut src = fs::File::open(signed_gsi_path)?;
-        let mut dst = fs::File::create(&staged)?;
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
-        let mut copied = 0u64;
-        let mut last_rep = 0u64;
-        loop {
-            let n = src.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            dst.write_all(&buf[..n])?;
-            copied += n as u64;
-            if copied - last_rep >= 32 * 1024 * 1024 || copied == gsi_size {
-                last_rep = copied;
-                emit_progress("stage", copied, gsi_size);
-            }
-        }
-        dst.sync_all()?;
-        staged
-    } else {
-        signed_gsi_path.to_path_buf()
-    };
+    let feed_path: PathBuf = run_step(
+        "dsu_stage",
+        "暂存镜像到 /data/gsi（适配 SELinux）",
+        format!("avbforge-core dsu stage --bytes {gsi_size}"),
+        None,
+        "STAGED",
+        |step| {
+            let p = if signed_gsi_path.starts_with("/data/gsi") {
+                step.info("Image already under /data/gsi, zero-copy pass-through.");
+                signed_gsi_path.to_path_buf()
+            } else if Path::new("/data/gsi").is_dir() {
+                let staged = PathBuf::from(format!("/data/gsi/.avbforge_stage_{}.img", std::process::id()));
+                emit_log(
+                    "info",
+                    &format!("Staging signed GSI into /data/gsi/ for gsid ({gsi_size} B)..."),
+                );
+                stage_guard.0 = Some(staged.clone());
+                let mut src = fs::File::open(signed_gsi_path)?;
+                let mut dst = fs::File::create(&staged)?;
+                let mut buf = vec![0u8; 4 * 1024 * 1024];
+                let mut copied = 0u64;
+                let mut last_rep = 0u64;
+                loop {
+                    let n = src.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    dst.write_all(&buf[..n])?;
+                    copied += n as u64;
+                    if copied - last_rep >= 32 * 1024 * 1024 || copied == gsi_size {
+                        last_rep = copied;
+                        emit_progress("stage", copied, gsi_size);
+                    }
+                }
+                dst.sync_all()?;
+                step.kv("staged", &[("path", &staged.display().to_string()), ("bytes", &copied.to_string())]);
+                staged
+            } else {
+                signed_gsi_path.to_path_buf()
+            };
+            Ok(p)
+        },
+    )?;
 
-    let img_file = fs::File::open(&feed_path)?;
-    emit_log(
-        "info",
-        &format!("Installing DSU via gsi_tool (gsi={gsi_size} B, userdata={userdata_size_bytes} B)..."),
-    );
+    run_step(
+        "dsu_gsi_install",
+        "通过原生 gsi_tool 写入 DSU 分区",
+        format!(
+            "gsi_tool install --gsi-size {gsi_size} --userdata-size {userdata_size_bytes} --wipe --no-reboot"
+        ),
+        Some(GateKind::BlockFlash),
+        "INSTALLED",
+        |step| {
+            let img_file = fs::File::open(&feed_path)?;
+            emit_log(
+                "info",
+                &format!("Installing DSU via gsi_tool (gsi={gsi_size} B, userdata={userdata_size_bytes} B)..."),
+            );
 
-    let install_args = [
-        "install",
-        "--gsi-size",
-        &gsi_size.to_string(),
-        "--userdata-size",
-        &userdata_size_bytes.to_string(),
-        "--wipe",
-        "--no-reboot",
-    ];
-    let out = Command::new("/system/bin/gsi_tool")
-        .args(install_args)
-        .stdin(Stdio::from(img_file))
-        .output()
-        .context("Failed to execute /system/bin/gsi_tool")?;
+            let install_args = [
+                "install",
+                "--gsi-size",
+                &gsi_size.to_string(),
+                "--userdata-size",
+                &userdata_size_bytes.to_string(),
+                "--wipe",
+                "--no-reboot",
+            ];
+            let out = Command::new("/system/bin/gsi_tool")
+                .args(install_args)
+                .stdin(Stdio::from(img_file))
+                .output()
+                .context("Failed to execute /system/bin/gsi_tool")?;
+
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                bail!(
+                    "gsi_tool install failed: {}{}",
+                    stderr,
+                    if stdout.is_empty() { String::new() } else { format!(" | {stdout}") }
+                );
+            }
+            step.kv(
+                "gsi_tool install",
+                &[("gsi_bytes", &gsi_size.to_string()), ("userdata_bytes", &userdata_size_bytes.to_string())],
+            );
+            step.ok_line("gsi_tool install completed");
+            Ok(())
+        },
+    )?;
     drop(stage_guard);
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        bail!(
-            "gsi_tool install failed: {}{}",
-            stderr,
-            if stdout.is_empty() { String::new() } else { format!(" | {stdout}") }
-        );
-    }
+    let status = run_step(
+        "dsu_enable_verify",
+        "启用 DSU 并回读 gsi_tool 状态",
+        en_cmd,
+        Some(GateKind::ReadbackVerify),
+        "ENABLED",
+        |step| {
+            let en_args: &[&str] = if single_boot {
+                &["enable", "-s"]
+            } else {
+                &["enable"]
+            };
+            let en = Command::new("/system/bin/gsi_tool").args(en_args).output()?;
+            if !en.status.success() {
+                bail!(
+                    "gsi_tool {:?} failed: {}",
+                    en_args,
+                    String::from_utf8_lossy(&en.stderr)
+                );
+            }
+            let status = dsu_cmd(&["status"])?;
+            step.kv("dsu_status", &[("single_boot", &single_boot.to_string())]);
+            step.ok_line(status.replace('
+', " · "));
+            Ok(status)
+        },
+    )?;
 
-    let en_args: &[&str] = if single_boot {
-        &["enable", "-s"]
-    } else {
-        &["enable"]
-    };
-    let en = Command::new("/system/bin/gsi_tool").args(en_args).output()?;
-    if !en.status.success() {
-        bail!(
-            "gsi_tool {:?} failed: {}",
-            en_args,
-            String::from_utf8_lossy(&en.stderr)
-        );
-    }
-
-    let status = dsu_cmd(&["status"])?;
     Ok(status)
 }
 
@@ -1184,71 +1545,111 @@ pub fn export_clean_init_boot(
     strip_ksu: bool,
     raw_backup_output: Option<&Path>,
 ) -> Result<ExportCleanInitBootReport> {
+    emit_plan(vec![
+        PlannedStep::new(
+            "export_live_init_boot",
+            "备份当前活动槽位 init_boot",
+            format!("avbforge-core export-init-boot --output {}", output_path.display()),
+        ),
+        PlannedStep::new(
+            "strip_ksu_ramdisk",
+            "检测并剥离旧版 KernelSU 导出纯净底包",
+            format!("avbforge-core export-clean-init-boot --strip-ksu {strip_ksu}"),
+        ),
+    ]);
+
     let tmp_dir = tempfile::tempdir()?;
     let raw_dump = tmp_dir.path().join("init_boot_live.img");
-    export_stock_init_boot(&raw_dump, slot_override)?;
-
-    let backup_path_str = if let Some(bkp) = raw_backup_output {
-        if let Some(parent) = bkp.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&raw_dump, bkp)?;
-        emit_log("info", &format!("Saved raw live init_boot backup to {}", bkp.display()));
-        Some(bkp.display().to_string())
-    } else {
-        None
-    };
-
-    let raw_bytes = fs::read(&raw_dump)?;
-    let raw_slice = match load_avb_image(&raw_dump) {
-        Ok(loaded) => match loaded.footer {
-            Some(f) => &raw_bytes[..f.original_image_size as usize],
-            None => &raw_bytes[..],
+    let backup_path_str = run_step(
+        "export_live_init_boot",
+        "备份当前活动槽位 init_boot",
+        format!("avbforge-core export-init-boot --output {}", output_path.display()),
+        None,
+        "EXPORTED",
+        |step| {
+            export_stock_init_boot(&raw_dump, slot_override)?;
+            let bkp_str = if let Some(bkp) = raw_backup_output {
+                if let Some(parent) = bkp.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&raw_dump, bkp)?;
+                emit_log("info", &format!("Saved raw live init_boot backup to {}", bkp.display()));
+                step.kv("raw_backup", &[("path", &bkp.display().to_string())]);
+                Some(bkp.display().to_string())
+            } else {
+                None
+            };
+            Ok(bkp_str)
         },
-        Err(_) => &raw_bytes[..],
-    };
+    )?;
 
-    let boot = BootImageV3V4::parse(raw_slice)?;
-    let info = boot.inspect()?;
-    let had_kernelsu = info.has_kernelsu;
-    let existing_dsu_keys = info.avbpubkey_entries;
+    run_step(
+        "strip_ksu_ramdisk",
+        "检测并剥离旧版 KernelSU 导出纯净底包",
+        format!("avbforge-core export-clean-init-boot --strip-ksu {strip_ksu}"),
+        Some(GateKind::OfflineVerify),
+        "CLEAN_OK",
+        |step| {
+            let raw_bytes = fs::read(&raw_dump)?;
+            let raw_slice = match load_avb_image(&raw_dump) {
+                Ok(loaded) => match loaded.footer {
+                    Some(f) => &raw_bytes[..f.original_image_size as usize],
+                    None => &raw_bytes[..],
+                },
+                Err(_) => &raw_bytes[..],
+            };
 
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+            let boot = BootImageV3V4::parse(raw_slice)?;
+            let info = boot.inspect()?;
+            let had_kernelsu = info.has_kernelsu;
+            let existing_dsu_keys = info.avbpubkey_entries;
 
-    let stripped_kernelsu = if had_kernelsu && strip_ksu {
-        emit_log(
-            "info",
-            "Detected existing KernelSU LKM in init_boot; stripping to clean stock init_boot...",
-        );
-        let (fmt, mut cpio) = boot.unpack_ramdisk()?;
-        let stripped = cpio.strip_kernelsu();
-        let repacked = boot.repack_with_ramdisk(fmt, &cpio)?;
-        // Verify repacked image is valid and KSU-free
-        let verify_boot = BootImageV3V4::parse(&repacked)?;
-        let verify_info = verify_boot.inspect()?;
-        if verify_info.has_kernelsu {
-            bail!("Failed to strip KernelSU completely from init_boot ramdisk");
-        }
-        fs::write(output_path, &repacked)?;
-        stripped
-    } else {
-        fs::copy(&raw_dump, output_path)?;
-        false
-    };
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
 
-    let size = fs::metadata(output_path)?.len();
-    let sha256 = sha256_file(output_path)?;
-    Ok(ExportCleanInitBootReport {
-        output_path: output_path.display().to_string(),
-        backup_path: backup_path_str,
-        size,
-        sha256,
-        had_kernelsu,
-        stripped_kernelsu,
-        existing_dsu_keys,
-    })
+            let stripped_kernelsu = if had_kernelsu && strip_ksu {
+                emit_log(
+                    "info",
+                    "Detected existing KernelSU LKM in init_boot; stripping to clean stock init_boot...",
+                );
+                let (fmt, mut cpio) = boot.unpack_ramdisk()?;
+                let stripped = cpio.strip_kernelsu();
+                let repacked = boot.repack_with_ramdisk(fmt, &cpio)?;
+                let verify_boot = BootImageV3V4::parse(&repacked)?;
+                let verify_info = verify_boot.inspect()?;
+                if verify_info.has_kernelsu {
+                    bail!("Failed to strip KernelSU completely from init_boot ramdisk");
+                }
+                fs::write(output_path, &repacked)?;
+                stripped
+            } else {
+                fs::copy(&raw_dump, output_path)?;
+                false
+            };
+
+            let size = fs::metadata(output_path)?.len();
+            let sha256 = sha256_file(output_path)?;
+            step.kv(
+                "clean init_boot ready",
+                &[
+                    ("had_ksu", &had_kernelsu.to_string()),
+                    ("stripped_ksu", &stripped_kernelsu.to_string()),
+                    ("sha256", &sha256),
+                ],
+            );
+            step.ok_line(format!("exported {}", output_path.display()));
+            Ok(ExportCleanInitBootReport {
+                output_path: output_path.display().to_string(),
+                backup_path: backup_path_str,
+                size,
+                sha256,
+                had_kernelsu,
+                stripped_kernelsu,
+                existing_dsu_keys,
+            })
+        },
+    )
 }
 
 #[cfg(test)]

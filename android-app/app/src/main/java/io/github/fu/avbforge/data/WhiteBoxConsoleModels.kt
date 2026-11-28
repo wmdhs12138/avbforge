@@ -77,7 +77,7 @@ object WhiteBoxEventReducer {
         val trimmed = rawLine.trim()
         if (trimmed.isEmpty()) return state
 
-        val nextRaw = state.rawLines + trimmed
+        val nextRaw = (state.rawLines + trimmed).takeLast(400)
         val obj = runCatching { json.parseToJsonElement(trimmed).jsonObject }.getOrNull()
             ?: return appendFallbackLog(state.copy(rawLines = nextRaw), trimmed)
 
@@ -174,7 +174,7 @@ object WhiteBoxEventReducer {
 
         val effectiveGate = gate ?: updatedBlocks.firstOrNull { it.stepId == id }?.gate
         val gateStatus = if (ok) GateStatus.PASSED else GateStatus.FAILED
-        val blocked = state.rebootBlocked || (!ok && effectiveGate == GateKind.READBACK_VERIFY)
+        val blocked = state.rebootBlocked || !ok
         return applyGate(
             state.copy(blocks = updatedBlocks, rebootBlocked = blocked),
             effectiveGate,
@@ -229,7 +229,7 @@ object WhiteBoxEventReducer {
         val updatedBlocks = if (idx >= 0) {
             state.blocks.toMutableList().apply {
                 val cur = this[idx]
-                this[idx] = cur.copy(lines = cur.lines + line)
+                this[idx] = cur.copy(lines = (cur.lines + line).takeLast(120))
             }
         } else {
             state.blocks + CommandBlock(

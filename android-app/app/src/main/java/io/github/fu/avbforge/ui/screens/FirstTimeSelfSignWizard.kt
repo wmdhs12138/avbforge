@@ -36,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -56,7 +57,9 @@ import io.github.fu.avbforge.ui.HelpDocs
 import io.github.fu.avbforge.ui.UiState
 import io.github.fu.avbforge.ui.components.AddKeyBottomSheet
 import io.github.fu.avbforge.ui.components.BackupPartitionsSheet
+import io.github.fu.avbforge.ui.components.DryRunCommandDialog
 import io.github.fu.avbforge.ui.components.M3EGroupRow
+import io.github.fu.avbforge.ui.components.WhiteBoxConsoleCard
 import io.github.fu.avbforge.ui.components.M3EPillChip
 import io.github.fu.avbforge.ui.components.M3EPrimaryButton
 import io.github.fu.avbforge.ui.components.WizardCalloutCard
@@ -79,6 +82,7 @@ fun FirstTimeSelfSignWizard(
 ) {
     val ctx = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val consoleState by vm.consoleState.collectAsState()
     val snap = state.snapshot
     val activeSlot = snap?.activeSlot?.ifBlank { "_b" } ?: "_b"
     val isNeo9 = snap?.let { SafetyGate.isSupportedNeo9(it) } ?: true
@@ -101,6 +105,7 @@ fun FirstTimeSelfSignWizard(
 
     var showBackupSheet by remember { mutableStateOf(false) }
     var showAddKeySheet by remember { mutableStateOf(false) }
+    var confirmFlashBundle by remember { mutableStateOf(false) }
 
     val stepTitles = remember {
         listOf("迁移须知", "备份原厂分区", "准备签名密钥", "KernelSU 与 DSU", "验签与安全写入")
@@ -278,6 +283,13 @@ fun FirstTimeSelfSignWizard(
                         )
                     }
                 }
+
+                WhiteBoxConsoleCard(
+                    state = consoleState,
+                    onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                    title = "分区备份 · 白盒控制台",
+                    busy = state.busy,
+                )
             }
 
             // STEP 3: Prepare Signing Key
@@ -574,12 +586,9 @@ fun FirstTimeSelfSignWizard(
                             }
 
                             M3EPrimaryButton(
-                                text = "确认安全写入并清缓存回读核验",
+                                text = "预览命令并安全写入（含清缓存回读核验）",
                                 icon = Icons.Rounded.FlashOn,
-                                onClick = {
-                                    val chosenSlot = slotChoices[slotChoiceIdx].first.ifBlank { null }
-                                    vm.flashForgedBundle(rep.outputDir, chosenSlot)
-                                },
+                                onClick = { confirmFlashBundle = true },
                                 enabled = !state.busy && allChecked,
                                 loading = state.busy,
                                 modifier = Modifier.fillMaxWidth(),
@@ -587,8 +596,41 @@ fun FirstTimeSelfSignWizard(
                         }
                     }
                 }
+
+                WhiteBoxConsoleCard(
+                    state = consoleState,
+                    onToggleRawMode = vm::setWhiteBoxRawJsonMode,
+                    title = "全链构建与刷写 · 白盒控制台",
+                    busy = state.busy,
+                    onReboot = { vm.rebootDevice() },
+                    rebootLabel = "安全重启进入自签名系统",
+                )
             }
         }
+    }
+
+    if (confirmFlashBundle && state.lastForgeReport != null) {
+        val rep = state.lastForgeReport
+        val chosenSlot = slotChoices[slotChoiceIdx].first.ifBlank { null }
+        val displaySlot = chosenSlot ?: activeSlot
+        val assessment = vm.computeSafety(includeKsuRoot)
+        val bundleName = File(rep.outputDir).name
+        val plannedCommands = listOf(
+            "avbforge-core avb verify --image $bundleName/vbmeta.img --follow-chain",
+            "su -c "avbforge-core flash-bundle --bundle-dir $bundleName --slot $displaySlot --fsync"",
+            "su -c "avbforge-core verify-readback --slot $displaySlot (${rep.signedPartitions.joinToString(", ")})"",
+        )
+        DryRunCommandDialog(
+            title = "刷前命令预演确认（全套自签名包）",
+            safetySummary = assessment?.stateNotice
+                ?: "目标槽位 $displaySlot · 共 ${rep.signedPartitions.size} 个已验签分区（vbmeta 最后写入）",
+            plannedCommands = plannedCommands,
+            onConfirm = {
+                confirmFlashBundle = false
+                vm.flashForgedBundle(rep.outputDir, chosenSlot)
+            },
+            onDismiss = { confirmFlashBundle = false },
+        )
     }
 
     if (showBackupSheet) {
