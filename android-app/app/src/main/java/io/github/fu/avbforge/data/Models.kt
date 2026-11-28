@@ -33,6 +33,13 @@ data class DeviceSnapshot(
     @SerialName("freezer_enabled") val freezerEnabled: Boolean = false,
     @SerialName("app_in_doze_whitelist") val appInDozeWhitelist: Boolean = false,
     @SerialName("partition_sizes") val partitionSizes: List<PartitionSizeInfo> = emptyList(),
+    @SerialName("firmware_version") val firmwareVersion: String = "",
+    @SerialName("security_patch") val securityPatch: String = "",
+    @SerialName("selinux_mode") val selinuxMode: String = "",
+    @SerialName("widevine_level") val widevineLevel: String = "",
+    @SerialName("vbmeta_rollback_index") val vbmetaRollbackIndex: Long? = null,
+    @SerialName("root_provider") val rootProvider: String? = null,
+    @SerialName("root_is_temporary") val rootIsTemporary: Boolean = false,
 )
 
 @Serializable
@@ -136,6 +143,31 @@ data class LocalGsiImage(
     val path: String,
     val sizeBytes: Long,
     val lastModified: Long,
+)
+
+data class LocalPartitionBackup(
+    val name: String,
+    val path: String,
+    val slot: String,
+    val partitions: List<String>,
+    val totalBytes: Long,
+    val lastModified: Long,
+    val pubkeySha1: String? = null,
+)
+
+data class TerminalLine(
+    val stream: String, // "stdout" or "stderr"
+    val text: String,
+)
+
+data class TerminalCommandEntry(
+    val id: String,
+    val timestamp: String,
+    val command: String,
+    val lines: List<TerminalLine> = emptyList(),
+    val exitCode: Int? = null,
+    val durationMs: Long? = null,
+    val running: Boolean = true,
 )
 
 data class CoreProgress(

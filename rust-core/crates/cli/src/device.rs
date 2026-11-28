@@ -52,6 +52,29 @@ pub struct DeviceSnapshot {
     pub freezer_enabled: bool,
     pub app_in_doze_whitelist: bool,
     pub partition_sizes: Vec<PartitionSizeInfo>,
+    #[serde(default)]
+    pub firmware_version: String,
+    #[serde(default)]
+    pub security_patch: String,
+    #[serde(default)]
+    pub selinux_mode: String,
+    #[serde(default)]
+    pub widevine_level: String,
+    #[serde(default)]
+    pub vbmeta_rollback_index: Option<u64>,
+    #[serde(default)]
+    pub root_provider: Option<String>,
+    #[serde(default)]
+    pub root_is_temporary: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DevinfoWriteReport {
+    pub device_path: String,
+    pub backup_path: Option<String>,
+    pub pkmd_len: usize,
+    pub keep_locked: bool,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -151,6 +174,7 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
 
     // Inspect live vbmeta_<slot>
     let mut vbmeta_pubkey_sha1 = None;
+    let mut vbmeta_rollback_index = None;
     let mut vbmeta_chained_partitions = Vec::new();
     let vbmeta_dev = PathBuf::from(format!("/dev/block/by-name/vbmeta{active_slot}"));
     if vbmeta_dev.exists() {
@@ -158,6 +182,7 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
             if copy_block_head(&vbmeta_dev, tmp.path(), 65536).is_ok() {
                 if let Ok(loaded) = load_avb_image(tmp.path()) {
                     vbmeta_pubkey_sha1 = loaded.vbmeta.public_key_sha1();
+                    vbmeta_rollback_index = Some(loaded.vbmeta.rollback_index);
                     for d in &loaded.vbmeta.descriptors {
                         if let AvbDescriptor::ChainPartition(c) = d {
                             vbmeta_chained_partitions.push(c.partition_name.clone());
@@ -224,6 +249,27 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
         }
     }
 
+    let firmware_version = {
+        let disp = getprop("ro.build.display.id");
+        if !disp.is_empty() {
+            disp
+        } else {
+            getprop("ro.build.version.incremental")
+        }
+    };
+    let security_patch = getprop("ro.build.version.security_patch");
+    let selinux_mode = Command::new("getenforce")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let widevine_level = detect_widevine_level();
+    let root_provider = detect_root_provider(ksu_version.as_deref());
+    let root_is_temporary = root_provider.is_some()
+        && verified_boot_state.eq_ignore_ascii_case("green")
+        && device_state.eq_ignore_ascii_case("locked");
+
     Ok(DeviceSnapshot {
         model,
         device,
@@ -246,6 +292,13 @@ pub fn inspect_device(app_package: Option<&str>) -> Result<DeviceSnapshot> {
         freezer_enabled,
         app_in_doze_whitelist,
         partition_sizes,
+        firmware_version,
+        security_patch,
+        selinux_mode,
+        widevine_level,
+        vbmeta_rollback_index,
+        root_provider,
+        root_is_temporary,
     })
 }
 
@@ -281,7 +334,11 @@ pub fn backup_partitions(
     let total = list.len() as u64;
     for (idx, part) in list.iter().enumerate() {
         emit_progress("backup", idx as u64, total);
-        let dev = PathBuf::from(format!("/dev/block/by-name/{part}{slot}"));
+        let dev = if part == "devinfo" {
+            PathBuf::from("/dev/block/by-name/devinfo")
+        } else {
+            PathBuf::from(format!("/dev/block/by-name/{part}{slot}"))
+        };
         if !dev.exists() {
             emit_log("warn", &format!("Partition device {} not found, skipping", dev.display()));
             let _ = run_step(
@@ -452,6 +509,16 @@ fn flash_partition_inner(
                 "info",
                 &format!("Writing {} ({img_sz} bytes) -> {}", image_path.display(), dev.display()),
             );
+            let was_ro = Command::new("blockdev")
+                .args(["--getro"])
+                .arg(&dev)
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+                .unwrap_or(false);
+            if was_ro {
+                let _ = Command::new("blockdev").args(["--setrw"]).arg(&dev).status();
+            }
             {
                 let mut src = File::open(image_path)?;
                 let mut dst = OpenOptions::new().write(true).open(&dev)?;
@@ -471,6 +538,9 @@ fn flash_partition_inner(
 
             let _ = Command::new("sync").status();
             let _ = Command::new("blockdev").args(["--flushbufs"]).arg(&dev).status();
+            if was_ro {
+                let _ = Command::new("blockdev").args(["--setro"]).arg(&dev).status();
+            }
             step.kv(
                 "partition flushed",
                 &[("device", &dev.display().to_string()), ("bytes", &img_sz.to_string())],
@@ -657,4 +727,159 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn detect_widevine_level() -> String {
+    for prop in ["ro.vendor.widevine.level", "vendor.widevine.level", "ro.widevine.level"] {
+        let v = getprop(prop);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    if let Ok(out) = Command::new("dumpsys").args(["media.drm"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("securityLevel:") {
+                let lvl = rest.trim();
+                if lvl.starts_with('L') {
+                    return lvl.to_string();
+                }
+            }
+        }
+    }
+    "Unknown".to_string()
+}
+
+fn detect_root_provider(ksu_version: Option<&str>) -> Option<String> {
+    if let Some(kv) = ksu_version.filter(|s| !s.is_empty()) {
+        let lower = kv.to_lowercase();
+        let label = if lower.contains("suki") {
+            format!("SukiSU ({})", kv.split_whitespace().next().unwrap_or(kv))
+        } else if lower.contains("next") {
+            format!("KernelSU Next ({})", kv.split_whitespace().next().unwrap_or(kv))
+        } else {
+            format!("KernelSU {}", kv.split_whitespace().next().unwrap_or(kv))
+        };
+        return Some(label);
+    }
+    if let Ok(out) = Command::new("/data/adb/apd").arg("-V").output() {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(format!("APatch {v}"));
+            }
+        }
+    }
+    if let Ok(out) = Command::new("magisk").arg("-v").output() {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(format!("Magisk {v}"));
+            }
+        }
+    }
+    if let Ok(out) = Command::new("su").arg("-v").output() {
+        if out.status.success() {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    if let Ok(out) = Command::new("id").arg("-u").output() {
+        if String::from_utf8_lossy(&out.stdout).trim() == "0" {
+            return Some("Root".to_string());
+        }
+    }
+    None
+}
+
+/// Write an AVB public key (`avb_pkmd.bin`) into PD2338 `devinfo` at offset 0x94 (u32 LE len)
+/// and 0x98 (raw key bytes) while keeping `is_unlocked` (0x0D) and `is_unlock_critical` (0x0E)
+/// locked (0) so ABL accepts the user key in Yellow state without triggering unlock2.
+pub fn write_devinfo_user_key(
+    pkmd_path: &Path,
+    keep_locked: bool,
+    backup_output: Option<&Path>,
+) -> Result<DevinfoWriteReport> {
+    let dev = PathBuf::from("/dev/block/by-name/devinfo");
+    if !dev.exists() {
+        bail!("devinfo partition device not found: {}", dev.display());
+    }
+    let pkmd = fs::read(pkmd_path).with_context(|| format!("Failed to read {}", pkmd_path.display()))?;
+    if pkmd.is_empty() || pkmd.len() > 2048 {
+        bail!("Invalid avb_pkmd.bin length: {} bytes (expected 1..=2048)", pkmd.len());
+    }
+
+    let tmp_dir = tempfile::tempdir()?;
+    let orig_path = tmp_dir.path().join("devinfo_orig.img");
+    let sz = blockdev_size(&dev)?;
+    if sz < 0xC90 {
+        bail!("devinfo partition too small ({sz} bytes)");
+    }
+    copy_block_head(&dev, &orig_path, sz)?;
+
+    let backup_str = if let Some(bkp) = backup_output {
+        if let Some(parent) = bkp.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&orig_path, bkp)?;
+        emit_log("info", &format!("Backed up original devinfo to {}", bkp.display()));
+        Some(bkp.display().to_string())
+    } else {
+        None
+    };
+
+    let mut data = fs::read(&orig_path)?;
+    if !data.starts_with(b"ANDROID-BOOT!") {
+        bail!("Refusing to modify devinfo: missing ANDROID-BOOT! magic header");
+    }
+    if keep_locked {
+        data[0x0D] = 0;
+        data[0x0E] = 0;
+    }
+    let len_le = (pkmd.len() as u32).to_le_bytes();
+    data[0x94..0x98].copy_from_slice(&len_le);
+    data[0x98..0x98 + pkmd.len()].copy_from_slice(&pkmd);
+
+    let staged = tmp_dir.path().join("devinfo_userkey.img");
+    fs::write(&staged, &data)?;
+    let expected_sha = sha256_file(&staged)?;
+
+    let was_ro = Command::new("blockdev")
+        .args(["--getro"])
+        .arg(&dev)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(false);
+    if was_ro {
+        let _ = Command::new("blockdev").args(["--setrw"]).arg(&dev).status();
+    }
+    {
+        let mut dst = OpenOptions::new().write(true).open(&dev)?;
+        dst.write_all(&data)?;
+        dst.sync_all()?;
+    }
+    let _ = Command::new("sync").status();
+    let _ = Command::new("blockdev").args(["--flushbufs"]).arg(&dev).status();
+    if was_ro {
+        let _ = Command::new("blockdev").args(["--setro"]).arg(&dev).status();
+    }
+
+    let rb_path = tmp_dir.path().join("devinfo_rb.img");
+    let rb_sha = copy_block_head(&dev, &rb_path, sz)?;
+    if rb_sha != expected_sha {
+        bail!("CRITICAL: devinfo readback SHA-256 mismatch! expected={expected_sha}, got={rb_sha}");
+    }
+
+    emit_log("info", &format!("Wrote {}B user key to devinfo (locked={keep_locked}, sha256={rb_sha})", pkmd.len()));
+    Ok(DevinfoWriteReport {
+        device_path: dev.display().to_string(),
+        backup_path: backup_str,
+        pkmd_len: pkmd.len(),
+        keep_locked,
+        sha256: rb_sha,
+    })
 }

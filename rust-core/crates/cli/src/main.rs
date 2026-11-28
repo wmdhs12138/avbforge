@@ -121,6 +121,15 @@ enum Commands {
         #[arg(long)]
         expected_pubkey: PathBuf,
     },
+    /// Write avb_pkmd.bin into devinfo (0x94/0x98) while keeping bootloader locked (0x0D=0)
+    WriteDevinfoKey {
+        #[arg(long)]
+        pkmd: PathBuf,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        keep_locked: bool,
+        #[arg(long)]
+        backup_output: Option<PathBuf>,
+    },
     /// GSI signing (supports .img / .xz / .gz / sparse)
     Gsi {
         #[command(subcommand)]
@@ -261,6 +270,10 @@ enum DsuAction {
     Wipe,
     WipeData,
     Reboot,
+    Backup {
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -518,6 +531,14 @@ fn run(cli: Cli) -> Result<()> {
             let reps = device::flash_bundle(&bundle_dir, slot.as_deref(), &expected_pubkey)?;
             emit_result(reps);
         }
+        Commands::WriteDevinfoKey {
+            pkmd,
+            keep_locked,
+            backup_output,
+        } => {
+            let rep = device::write_devinfo_user_key(&pkmd, keep_locked, backup_output.as_deref())?;
+            emit_result(rep);
+        }
         Commands::Gsi { action } => match action {
             GsiAction::Sign {
                 input,
@@ -587,6 +608,10 @@ fn run(cli: Cli) -> Result<()> {
             DsuAction::Reboot => {
                 let st = forge::dsu_reboot()?;
                 emit_result(json!({ "output": st }));
+            }
+            DsuAction::Backup { out_dir } => {
+                let rep = forge::dsu_backup(&out_dir)?;
+                emit_result(rep);
             }
         },
     }

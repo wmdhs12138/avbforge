@@ -31,6 +31,9 @@ class CoreRunner(private val context: Context) {
         onLog: (String, String) -> Unit = { _, _ -> },
         onProgress: (CoreProgress) -> Unit = {},
         onRawLine: (String) -> Unit = {},
+        onCommandStart: (String) -> Unit = {},
+        onStreamLine: (String, String) -> Unit = { _, _ -> },
+        onCommandFinish: (Int, Long) -> Unit = { _, _ -> },
     ): Result<JsonElement> = withContext(Dispatchers.IO) {
         val bin = coreBinaryPath()
         if (!bin.exists()) {
@@ -38,6 +41,11 @@ class CoreRunner(private val context: Context) {
                 IllegalStateException("Native core binary not found: ${bin.absolutePath}")
             )
         }
+
+        val displayArgs = (listOf("avbforge-core") + args).joinToString(" ") { shellQuoteIfNeeded(it) }
+        val displayCmd = if (requireRoot) "su -c '$displayArgs'" else displayArgs
+        onCommandStart(displayCmd)
+        val startedAt = System.currentTimeMillis()
 
         val cmd = if (requireRoot) {
             val escaped = (listOf(bin.absolutePath) + args).joinToString(" ") { shellQuote(it) }
@@ -49,6 +57,8 @@ class CoreRunner(private val context: Context) {
         val proc = try {
             ProcessBuilder(cmd).redirectErrorStream(false).start()
         } catch (e: Exception) {
+            onStreamLine("stderr", e.message ?: "Failed to start process")
+            onCommandFinish(-1, System.currentTimeMillis() - startedAt)
             return@withContext Result.failure(e)
         }
 
@@ -61,6 +71,7 @@ class CoreRunner(private val context: Context) {
                     val trimmed = line.trim()
                     if (trimmed.isNotEmpty()) {
                         onRawLine(trimmed)
+                        onStreamLine("stderr", trimmed)
                         val parsedErr = runCatching {
                             val obj = json.parseToJsonElement(trimmed).jsonObject
                             if (obj["event"]?.jsonPrimitive?.content == "error") {
@@ -79,6 +90,7 @@ class CoreRunner(private val context: Context) {
                 val trimmed = line.trim()
                 if (trimmed.isEmpty()) return@forEach
                 onRawLine(trimmed)
+                onStreamLine("stdout", trimmed)
                 val parsed = runCatching { json.parseToJsonElement(trimmed).jsonObject }.getOrNull()
                 if (parsed == null) {
                     onLog("info", trimmed)
@@ -111,6 +123,9 @@ class CoreRunner(private val context: Context) {
         val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
         if (!finished) {
             proc.destroyForcibly()
+            val elapsed = System.currentTimeMillis() - startedAt
+            onStreamLine("stderr", "Process timed out after ${timeoutSeconds}s")
+            onCommandFinish(124, elapsed)
             return@withContext Result.failure(
                 IllegalStateException("命令执行超时（>${timeoutSeconds}s），已强制中止")
             )
@@ -118,6 +133,9 @@ class CoreRunner(private val context: Context) {
         stderrThread.join(2000)
 
         val exitCode = proc.exitValue()
+        val elapsed = System.currentTimeMillis() - startedAt
+        onCommandFinish(exitCode, elapsed)
+
         if (exitCode != 0) {
             val msg = errLines.lastOrNull() ?: "avbforge-core exited with code $exitCode"
             return@withContext Result.failure(IllegalStateException(msg))
@@ -130,4 +148,7 @@ class CoreRunner(private val context: Context) {
 
     private fun shellQuote(arg: String): String =
         "'" + arg.replace("'", "'\"'\"'") + "'"
+
+    private fun shellQuoteIfNeeded(arg: String): String =
+        if (arg.any { it.isWhitespace() || it == '\'' || it == '"' }) shellQuote(arg) else arg
 }

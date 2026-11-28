@@ -1,6 +1,7 @@
 package io.github.fu.avbforge.ui
 
 import android.app.Application
+import android.content.Context
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -20,6 +21,9 @@ import io.github.fu.avbforge.data.ForgeBundleReport
 import io.github.fu.avbforge.data.GsiSignReport
 import io.github.fu.avbforge.data.KeyEntry
 import io.github.fu.avbforge.data.LocalGsiImage
+import io.github.fu.avbforge.data.LocalPartitionBackup
+import io.github.fu.avbforge.data.TerminalCommandEntry
+import io.github.fu.avbforge.data.TerminalLine
 import io.github.fu.avbforge.data.PatchDsuKeyReport
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +34,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class UiState(
     val busy: Boolean = false,
@@ -49,6 +56,8 @@ data class UiState(
     val dsuStatusText: String = "unknown",
     val dsuInfo: DsuInfoReport? = null,
     val localGsiImages: List<LocalGsiImage> = emptyList(),
+    val localPartitionBackups: List<LocalPartitionBackup> = emptyList(),
+    val lastInstalledDsuImageName: String? = null,
     val errorBanner: String? = null,
 )
 
@@ -60,8 +69,66 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState(keys = vault.listKeys()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    private val prefs = app.getSharedPreferences("avbforge_prefs", Context.MODE_PRIVATE)
+
     private val _consoleState = MutableStateFlow(WhiteBoxConsoleState())
     val consoleState: StateFlow<WhiteBoxConsoleState> = _consoleState.asStateFlow()
+
+    private val _terminalEntries = MutableStateFlow<List<TerminalCommandEntry>>(emptyList())
+    val terminalEntries: StateFlow<List<TerminalCommandEntry>> = _terminalEntries.asStateFlow()
+
+    private fun nowTime(): String =
+        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+
+    fun clearTerminalEntries() {
+        _terminalEntries.value = emptyList()
+    }
+
+    private suspend fun execCore(
+        args: List<String>,
+        requireRoot: Boolean = true,
+        timeoutSeconds: Long = 600,
+        onLog: (String, String) -> Unit = ::appendLog,
+        onProgress: (CoreProgress) -> Unit = {},
+        onRawLine: (String) -> Unit = {},
+    ): Result<kotlinx.serialization.json.JsonElement> {
+        val entryId = "cmd_${System.nanoTime()}"
+        return execCore(
+            args = args,
+            requireRoot = requireRoot,
+            timeoutSeconds = timeoutSeconds,
+            onLog = onLog,
+            onProgress = onProgress,
+            onRawLine = onRawLine,
+            onCommandStart = { cmdStr ->
+                val entry = TerminalCommandEntry(
+                    id = entryId,
+                    timestamp = nowTime(),
+                    command = cmdStr,
+                    running = true,
+                )
+                _terminalEntries.update { (it + entry).takeLast(60) }
+            },
+            onStreamLine = { stream, line ->
+                _terminalEntries.update { list ->
+                    list.map { e ->
+                        if (e.id == entryId) {
+                            e.copy(lines = (e.lines + TerminalLine(stream, line)).takeLast(160))
+                        } else e
+                    }
+                }
+            },
+            onCommandFinish = { code, elapsed ->
+                _terminalEntries.update { list ->
+                    list.map { e ->
+                        if (e.id == entryId) {
+                            e.copy(exitCode = code, durationMs = elapsed, running = false)
+                        } else e
+                    }
+                }
+            },
+        )
+    }
 
     val baseWorkDir: File
         get() = File(
@@ -111,7 +178,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshDevice() {
         viewModelScope.launch {
             _state.update { it.copy(busy = true, statusMessage = "正在体检本机 AVB 与 DSU 状态...", errorBanner = null) }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf("inspect-device", "--package", getApplication<Application>().packageName),
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -125,6 +192,8 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                         dsuStatusText = snap.dsuStatus,
                         keys = vault.listKeys(),
                         localGsiImages = scanLocalGsiImages(),
+                        localPartitionBackups = scanLocalPartitionBackups(),
+                        lastInstalledDsuImageName = prefs.getString("last_dsu_image_name", null),
                         statusMessage = "体检完成 (${snap.model} / Android ${snap.androidRelease} / ${snap.activeSlot})",
                     )
                 }
@@ -155,7 +224,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             if (partitions.isNotEmpty()) {
                 args += listOf("--partitions", partitions.joinToString(","))
             }
-            val res = runner.run(
+            val res = execCore(
                 args = args,
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -186,7 +255,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             val tmpPem = File(tmpDir, "avb.pem")
             val tmpPkmd = File(tmpDir, "avb_pkmd.bin")
             try {
-                val res = runner.run(
+                val res = execCore(
                     args = listOf(
                         "key", "gen",
                         "--bits", bits.toString(),
@@ -230,7 +299,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 if (!passphrase.isNullOrEmpty()) {
                     args += listOf("--passphrase", passphrase)
                 }
-                val res = runner.run(args = args, requireRoot = false, onLog = ::appendLog)
+                val res = execCore(args = args, requireRoot = false, onLog = ::appendLog)
                 res.onSuccess { elem ->
                     val sha1 = elem.jsonObject["sha1"]?.jsonPrimitive?.content ?: ""
                     val bits = elem.jsonObject["bits"]?.jsonPrimitive?.content?.toIntOrNull() ?: 2048
@@ -286,7 +355,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val dst = File(baseWorkDir, "stock_init_boot_for_ksu.img")
             _state.update { it.copy(busy = true, statusMessage = "正在导出当前槽位 init_boot.img...", errorBanner = null) }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf("export-init-boot", "--output", dst.absolutePath),
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -343,7 +412,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     if (!patchedInitBootPath.isNullOrBlank()) {
                         args += listOf("--patched-init-boot", patchedInitBootPath)
                     }
-                    runner.run(
+                    execCore(
                         args = args,
                         requireRoot = false,
                         onLog = ::appendLog,
@@ -385,7 +454,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             if (!targetSlot.isNullOrBlank()) {
                 args += listOf("--slot", targetSlot)
             }
-            val res = runner.run(
+            val res = execCore(
                 args = args,
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -431,7 +500,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     errorBanner = null,
                 )
             }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf(
                     "avb", "verify",
                     "--image", imagePath,
@@ -487,7 +556,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(busy = true, statusMessage = msg, errorBanner = null) }
             runCatching {
                 vault.withTempPlaintextKey(key.id) { pemFile, _ ->
-                    runner.run(
+                    execCore(
                         args = listOf(
                             "gsi", "sign",
                             "--input", inputPath,
@@ -543,7 +612,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             if (key != null) {
                 args += listOf("--expected-pubkey", vault.pkmdFile(key.id).absolutePath)
             }
-            val res = runner.run(
+            val res = execCore(
                 args = args,
                 requireRoot = true,
                 timeoutSeconds = 1800,
@@ -553,12 +622,15 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             )
             res.onSuccess { elem ->
                 val st = elem.jsonObject["status"]?.jsonPrimitive?.content ?: "installed"
+                val imgName = File(signedPath).name
+                prefs.edit().putString("last_dsu_image_name", imgName).apply()
                 _state.update {
                     it.copy(
                         busy = false,
                         progress = null,
                         dsuStatusText = st,
-                        statusMessage = "DSU 安装就绪（单次启动=${singleBoot}），现在重启即可进入 GSI！",
+                        lastInstalledDsuImageName = imgName,
+                        statusMessage = "DSU 安装就绪（${imgName}），现在重启即可进入！",
                     )
                 }
                 refreshDsuInfo(silent = true)
@@ -622,7 +694,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             if (!silent) {
                 _state.update { it.copy(busy = true, statusMessage = "正在刷新本机 DSU / GSI 状态...", errorBanner = null) }
             }
-            val res = runner.run(args = listOf("dsu", "info"), requireRoot = true, onLog = ::appendLog)
+            val res = execCore(args = listOf("dsu", "info"), requireRoot = true, onLog = ::appendLog)
             val localImgs = scanLocalGsiImages()
             res.onSuccess { elem ->
                 val info = runner.json.decodeFromJsonElement<DsuInfoReport>(elem)
@@ -651,7 +723,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val modeText = if (singleBoot) "单次防变砖启动 (-s)" else "持续启动"
             _state.update { it.copy(busy = true, statusMessage = "正在启用 GSI（$modeText）...", errorBanner = null) }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf("dsu", "enable", "--single-boot", singleBoot.toString()),
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -673,7 +745,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun wipeDsuData() {
         viewModelScope.launch {
             _state.update { it.copy(busy = true, statusMessage = "正在重置 GSI 独立 Userdata（保留系统镜像）...", errorBanner = null) }
-            val res = runner.run(args = listOf("dsu", "wipe-data"), requireRoot = true, onLog = ::appendLog)
+            val res = execCore(args = listOf("dsu", "wipe-data"), requireRoot = true, onLog = ::appendLog)
             res.onSuccess {
                 _state.update { it.copy(busy = false, statusMessage = "已标记重置 GSI 数据，下次进入 GSI 将重新初始化（不影响原系统）") }
                 refreshDsuInfo(silent = true)
@@ -686,7 +758,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun rebootToDsu() {
         viewModelScope.launch {
             _state.update { it.copy(busy = true, statusMessage = "正在重启设备进入 GSI...", errorBanner = null) }
-            val res = runner.run(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
+            val res = execCore(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
             res.onFailure { err ->
                 _state.update { it.copy(busy = false, errorBanner = "重启失败：${err.message}") }
             }
@@ -696,7 +768,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
     fun rebootDevice() {
         viewModelScope.launch {
             _state.update { it.copy(busy = true, statusMessage = "正在执行安全重启...", errorBanner = null) }
-            val res = runner.run(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
+            val res = execCore(args = listOf("dsu", "reboot"), requireRoot = true, onLog = ::appendLog)
             res.onFailure { err ->
                 _state.update { it.copy(busy = false, errorBanner = "重启失败：${err.message}") }
             }
@@ -711,9 +783,18 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 else -> "执行 gsi_tool $action"
             }
             _state.update { it.copy(busy = true, statusMessage = "正在$label...", errorBanner = null) }
-            val res = runner.run(args = listOf("dsu", action), requireRoot = true, onLog = ::appendLog)
+            val res = execCore(args = listOf("dsu", action), requireRoot = true, onLog = ::appendLog)
             res.onSuccess {
-                _state.update { it.copy(busy = false, statusMessage = "${label}完成") }
+                if (action == "wipe") {
+                    prefs.edit().remove("last_dsu_image_name").apply()
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        lastInstalledDsuImageName = if (action == "wipe") null else it.lastInstalledDsuImageName,
+                        statusMessage = "${label}完成",
+                    )
+                }
                 refreshDsuInfo(silent = true)
                 refreshDevice()
             }.onFailure { err ->
@@ -739,7 +820,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在备份当前 init_boot 并注入 DSU 公钥...", errorBanner = null) }
 
-            val expRes = runner.run(
+            val expRes = execCore(
                 args = listOf("export-init-boot", "--output", bkpFile.absolutePath),
                 requireRoot = true,
                 onLog = ::appendLog,
@@ -752,7 +833,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
 
             runCatching {
                 vault.withTempPlaintextKey(key.id) { pemFile, _ ->
-                    runner.run(
+                    execCore(
                         args = listOf(
                             "patch-dsu-key",
                             "--input", bkpFile.absolutePath,
@@ -798,7 +879,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     errorBanner = null,
                 )
             }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf(
                     "export-clean-init-boot",
                     "--output", cleanFile.absolutePath,
@@ -855,7 +936,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
             var metaSource = _state.value.cleanInitBootReport?.backupPath?.takeIf { File(it).exists() }
             if (metaSource == null) {
                 val tmpMeta = File(baseWorkDir, "init_boot_meta_backup_$ts.img")
-                val exp = runner.run(
+                val exp = execCore(
                     args = listOf("export-init-boot", "--output", tmpMeta.absolutePath),
                     requireRoot = true,
                     onLog = ::appendLog,
@@ -879,7 +960,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                     if (!metaSource.isNullOrBlank()) {
                         args += listOf("--metadata-source", metaSource)
                     }
-                    runner.run(
+                    execCore(
                         args = args,
                         requireRoot = false,
                         onLog = ::appendLog,
@@ -923,7 +1004,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             prepareWhiteBoxConsole()
             _state.update { it.copy(busy = true, statusMessage = "正在写入活动槽位 init_boot 并清缓存回读校验...", errorBanner = null) }
-            val res = runner.run(
+            val res = execCore(
                 args = listOf(
                     "flash-partition",
                     "--partition", "init_boot",
@@ -946,6 +1027,341 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 refreshDevice()
             }.onFailure { err ->
                 _state.update { it.copy(busy = false, progress = null, errorBanner = "写入 init_boot 失败：${err.message}") }
+            }
+        }
+    }
+
+    private fun scanLocalPartitionBackups(): List<LocalPartitionBackup> {
+        val dir = baseWorkDir
+        val subDirs = dir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }.orEmpty()
+        return subDirs.mapNotNull { folder ->
+            val imgFiles = folder.listFiles()?.filter { it.isFile && it.name.endsWith(".img", ignoreCase = true) }.orEmpty()
+            if (imgFiles.isEmpty()) return@mapNotNull null
+            val manifestFile = File(folder, "manifest.json")
+            val manifest = if (manifestFile.exists()) {
+                runCatching { runner.json.decodeFromString<BackupManifest>(manifestFile.readText()) }.getOrNull()
+            } else null
+            val parts = manifest?.partitions?.map { it.partition }
+                ?: imgFiles.map { it.nameWithoutExtension }.sorted()
+            val pubkey = manifest?.partitions?.firstOrNull { !it.avbPubkeySha1.isNullOrBlank() }?.avbPubkeySha1
+            val totalSize = imgFiles.sumOf { it.length() }
+            LocalPartitionBackup(
+                name = folder.name,
+                path = folder.absolutePath,
+                slot = manifest?.slot?.ifBlank { "_b" } ?: (_state.value.snapshot?.activeSlot ?: "_b"),
+                partitions = parts,
+                totalBytes = totalSize,
+                lastModified = folder.lastModified(),
+                pubkeySha1 = pubkey,
+            )
+        }.sortedByDescending { it.lastModified }
+    }
+
+    fun refreshLocalBackups() {
+        _state.update { it.copy(localPartitionBackups = scanLocalPartitionBackups()) }
+    }
+
+    fun backupPartitionsNamed(
+        folderName: String,
+        slot: String? = null,
+        partitions: List<String> = emptyList(),
+    ) {
+        viewModelScope.launch {
+            val safeName = folderName.trim().replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank {
+                "backup_${System.currentTimeMillis() / 1000}"
+            }
+            val outDir = File(baseWorkDir, safeName)
+            prepareWhiteBoxConsole()
+            _state.update { it.copy(busy = true, statusMessage = "正在备份分区到 $safeName...", errorBanner = null) }
+            val args = mutableListOf("backup-partitions", "--out-dir", outDir.absolutePath)
+            if (!slot.isNullOrBlank()) args += listOf("--slot", slot)
+            if (partitions.isNotEmpty()) args += listOf("--partitions", partitions.joinToString(","))
+            val res = execCore(
+                args = args,
+                requireRoot = true,
+                onLog = ::appendLog,
+                onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
+            )
+            res.onSuccess { elem ->
+                val manifest = runner.json.decodeFromJsonElement<BackupManifest>(elem)
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        lastBackup = manifest,
+                        lastBackupDir = outDir.absolutePath,
+                        localPartitionBackups = scanLocalPartitionBackups(),
+                        statusMessage = "备份完成：${manifest.partitions.size} 个分区已保存到 $safeName",
+                    )
+                }
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, progress = null, errorBanner = "备份失败：${err.message}") }
+            }
+        }
+    }
+
+    fun renamePartitionBackup(oldPath: String, newName: String) {
+        runCatching {
+            val src = File(oldPath)
+            val safeName = newName.trim().replace(Regex("[^A-Za-z0-9._-]"), "_")
+            if (safeName.isBlank()) error("名称不能为空")
+            if (src.parentFile?.canonicalPath != baseWorkDir.canonicalPath) error("仅允许管理 AVBForge 目录内的备份")
+            val dst = File(baseWorkDir, safeName)
+            if (dst.exists()) error("同名备份目录已存在")
+            if (!src.renameTo(dst)) error("重命名失败")
+            safeName
+        }.onSuccess { safeName ->
+            _state.update {
+                it.copy(
+                    localPartitionBackups = scanLocalPartitionBackups(),
+                    statusMessage = "已重命名备份为 $safeName",
+                )
+            }
+        }.onFailure { err ->
+            _state.update { it.copy(errorBanner = "重命名失败：${err.message}") }
+        }
+    }
+
+    fun deletePartitionBackup(path: String) {
+        runCatching {
+            val dir = File(path)
+            if (dir.parentFile?.canonicalPath != baseWorkDir.canonicalPath) error("仅允许删除 AVBForge 目录内的备份")
+            if (!dir.deleteRecursively()) error("删除备份目录失败")
+        }.onSuccess {
+            _state.update {
+                it.copy(
+                    localPartitionBackups = scanLocalPartitionBackups(),
+                    statusMessage = "已删除备份 ${File(path).name}",
+                )
+            }
+        }.onFailure { err ->
+            _state.update { it.copy(errorBanner = "删除备份失败：${err.message}") }
+        }
+    }
+
+    /**
+     * Re-sign (optional) and flash a single partition (`init_boot`, `boot`, `vendor_boot`, etc.).
+     * Never silently modifies ramdisk or injects DSU pubkeys behind the user's back.
+     */
+    fun resignAndFlashSinglePartition(
+        partition: String,
+        imagePath: String,
+        autoSign: Boolean,
+        targetSlot: String? = null,
+    ) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "请先在密钥库中设置默认私钥") }
+            return
+        }
+        viewModelScope.launch {
+            prepareWhiteBoxConsole()
+            _state.update { it.copy(busy = true, statusMessage = "正在处理并写入 $partition...", errorBanner = null) }
+            val ts = System.currentTimeMillis() / 1000
+            var imageToFlash = imagePath
+
+            if (autoSign && partition != "devinfo") {
+                val signedOut = File(baseWorkDir, "${partition}_signed_$ts.img")
+                val metaBackup = File(baseWorkDir, "${partition}_meta_$ts.img")
+                if (partition == "init_boot") {
+                    val exp = execCore(
+                        args = listOf("export-init-boot", "--output", metaBackup.absolutePath),
+                        requireRoot = true,
+                        onLog = ::appendLog,
+                        onRawLine = ::onCoreRawLine,
+                    )
+                    val signRes = runCatching {
+                        vault.withTempPlaintextKey(key.id) { pemFile, _ ->
+                            val args = mutableListOf(
+                                "patch-dsu-key",
+                                "--input", imagePath,
+                                "--output", signedOut.absolutePath,
+                                "--key", pemFile.absolutePath,
+                                "--partition-name", "init_boot",
+                                "--inject-dsu-key", "false",
+                            )
+                            if (exp.isSuccess) args += listOf("--metadata-source", metaBackup.absolutePath)
+                            execCore(args = args, requireRoot = false, onLog = ::appendLog, onRawLine = ::onCoreRawLine)
+                        }
+                    }
+                    val inner = signRes.getOrNull()
+                    if (signRes.isFailure || inner == null || inner.isFailure) {
+                        val msg = signRes.exceptionOrNull()?.message ?: inner?.exceptionOrNull()?.message ?: "重签失败"
+                        _state.update { it.copy(busy = false, errorBanner = "重签 $partition 失败：$msg") }
+                        return@launch
+                    }
+                    imageToFlash = signedOut.absolutePath
+                } else {
+                    // For boot / vendor_boot / dtbo / recovery: copy & add_hash_footer using partition size from live snapshot
+                    runCatching { File(imagePath).copyTo(signedOut, overwrite = true) }
+                    val partSize = _state.value.snapshot?.partitionSizes
+                        ?.firstOrNull { it.name == partition }?.sizeBytes
+                        ?: signedOut.length()
+                    val signRes = runCatching {
+                        vault.withTempPlaintextKey(key.id) { pemFile, _ ->
+                            execCore(
+                                args = listOf(
+                                    "avb", "add-hash-footer",
+                                    "--image", signedOut.absolutePath,
+                                    "--partition-name", partition,
+                                    "--partition-size", partSize.toString(),
+                                    "--key", pemFile.absolutePath,
+                                ),
+                                requireRoot = false,
+                                onLog = ::appendLog,
+                                onRawLine = ::onCoreRawLine,
+                            )
+                        }
+                    }
+                    val inner = signRes.getOrNull()
+                    if (signRes.isFailure || inner == null || inner.isFailure) {
+                        val msg = signRes.exceptionOrNull()?.message ?: inner?.exceptionOrNull()?.message ?: "重签失败"
+                        _state.update { it.copy(busy = false, errorBanner = "重签 $partition 失败：$msg") }
+                        return@launch
+                    }
+                    imageToFlash = signedOut.absolutePath
+                }
+            }
+
+            val flashArgs = mutableListOf(
+                "flash-partition",
+                "--partition", partition,
+                "--image", imageToFlash,
+                "--expected-pubkey", vault.pkmdFile(key.id).absolutePath,
+            )
+            if (!targetSlot.isNullOrBlank()) flashArgs += listOf("--slot", targetSlot)
+
+            val flashRes = execCore(
+                args = flashArgs,
+                requireRoot = true,
+                onLog = ::appendLog,
+                onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
+            )
+            flashRes.onSuccess {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        statusMessage = "$partition 已安全写入并通过回读核验",
+                    )
+                }
+                refreshDevice()
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, progress = null, errorBanner = "写入 $partition 失败：${err.message}") }
+            }
+        }
+    }
+
+    fun forgeAndFlashFullChain(
+        stockDirPath: String,
+        writeDevinfoKey: Boolean,
+        targetSlot: String? = null,
+    ) {
+        val key = vault.getDefaultKey() ?: run {
+            _state.update { it.copy(errorBanner = "请先在密钥库中设置默认私钥") }
+            return
+        }
+        viewModelScope.launch {
+            val ts = System.currentTimeMillis() / 1000
+            val outDir = File(baseWorkDir, "forged_$ts")
+            prepareWhiteBoxConsole()
+            _state.update { it.copy(busy = true, statusMessage = "正在全链重签并验签 7 个分区...", errorBanner = null) }
+
+            val forgeRes = runCatching {
+                vault.withTempPlaintextKey(key.id) { pemFile, _ ->
+                    execCore(
+                        args = listOf(
+                            "forge-bundle",
+                            "--stock-dir", stockDirPath,
+                            "--out-dir", outDir.absolutePath,
+                            "--key", pemFile.absolutePath,
+                            "--inject-dsu-key", "false",
+                        ),
+                        requireRoot = false,
+                        onLog = ::appendLog,
+                        onRawLine = ::onCoreRawLine,
+                    )
+                }
+            }
+            val forgeInner = forgeRes.getOrNull()
+            if (forgeRes.isFailure || forgeInner == null || forgeInner.isFailure) {
+                val msg = forgeRes.exceptionOrNull()?.message ?: forgeInner?.exceptionOrNull()?.message ?: "全链重签失败"
+                _state.update { it.copy(busy = false, errorBanner = "全链构建失败：$msg") }
+                return@launch
+            }
+
+            if (writeDevinfoKey) {
+                val devBackup = File(baseWorkDir, "devinfo_orig_$ts.img")
+                val devRes = execCore(
+                    args = listOf(
+                        "write-devinfo-key",
+                        "--pkmd", vault.pkmdFile(key.id).absolutePath,
+                        "--keep-locked", "true",
+                        "--backup-output", devBackup.absolutePath,
+                    ),
+                    requireRoot = true,
+                    onLog = ::appendLog,
+                    onRawLine = ::onCoreRawLine,
+                )
+                if (devRes.isFailure) {
+                    _state.update { it.copy(busy = false, errorBanner = "写入 devinfo user key 失败：${devRes.exceptionOrNull()?.message}") }
+                    return@launch
+                }
+            }
+
+            val flashArgs = mutableListOf(
+                "flash-bundle",
+                "--bundle-dir", outDir.absolutePath,
+                "--expected-pubkey", vault.pkmdFile(key.id).absolutePath,
+            )
+            if (!targetSlot.isNullOrBlank()) flashArgs += listOf("--slot", targetSlot)
+
+            val flashRes = execCore(
+                args = flashArgs,
+                requireRoot = true,
+                onLog = ::appendLog,
+                onProgress = { p -> _state.update { it.copy(progress = p) } },
+                onRawLine = ::onCoreRawLine,
+            )
+            flashRes.onSuccess {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        progress = null,
+                        statusMessage = "全链自签名包已安全写入并通过回读核验！",
+                    )
+                }
+                refreshDevice()
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, progress = null, errorBanner = "全链刷写失败：${err.message}") }
+            }
+        }
+    }
+
+    fun backupDsuNamed(folderName: String) {
+        viewModelScope.launch {
+            val safeName = folderName.trim().replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank {
+                "dsu_backup_${System.currentTimeMillis() / 1000}"
+            }
+            val outDir = File(baseWorkDir, safeName)
+            _state.update { it.copy(busy = true, statusMessage = "正在备份当前 DSU 到 $safeName...", errorBanner = null) }
+            val res = execCore(
+                args = listOf("dsu", "backup", "--out-dir", outDir.absolutePath),
+                requireRoot = true,
+                timeoutSeconds = 1800,
+                onLog = ::appendLog,
+                onRawLine = ::onCoreRawLine,
+            )
+            res.onSuccess {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        statusMessage = "DSU 已备份到 Download/AVBForge/$safeName",
+                    )
+                }
+            }.onFailure { err ->
+                _state.update { it.copy(busy = false, errorBanner = "备份 DSU 失败：${err.message}") }
             }
         }
     }

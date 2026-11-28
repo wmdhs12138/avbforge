@@ -1651,6 +1651,51 @@ pub fn export_clean_init_boot(
     )
 }
 
+
+pub fn dsu_backup(out_dir: &Path) -> Result<serde_json::Value> {
+    fs::create_dir_all(out_dir)?;
+    let status = dsu_cmd(&["status"]).unwrap_or_else(|_| "unknown".to_string());
+    fs::write(out_dir.join("gsi_status.txt"), &status)?;
+
+    let base = Path::new("/data/gsi/dsu");
+    let mut copied_files = Vec::new();
+    let mut total_bytes = 0u64;
+    if base.is_dir() {
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let dst = out_dir.join(&name);
+                emit_log("info", &format!("Backing up DSU file {name}..."));
+                let n = fs::copy(&path, &dst)?;
+                total_bytes += n;
+                copied_files.push(name);
+            } else if path.is_dir() {
+                for sub in fs::read_dir(&path)? {
+                    let sub = sub?;
+                    let sp = sub.path();
+                    if sp.is_file() {
+                        let name = sub.file_name().to_string_lossy().to_string();
+                        if name.starts_with("system_gsi") || name.starts_with("userdata_gsi") {
+                            let dst = out_dir.join(&name);
+                            emit_log("info", &format!("Backing up DSU image {name}..."));
+                            let n = fs::copy(&sp, &dst)?;
+                            total_bytes += n;
+                            copied_files.push(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "output_dir": out_dir.display().to_string(),
+        "files": copied_files,
+        "total_bytes": total_bytes,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
