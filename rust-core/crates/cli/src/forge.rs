@@ -1364,8 +1364,7 @@ pub fn dsu_install(
             }
             let status = dsu_cmd(&["status"])?;
             step.kv("dsu_status", &[("single_boot", &single_boot.to_string())]);
-            step.ok_line(status.replace('
-', " · "));
+            step.ok_line(status.replace('\n', " · "));
             Ok(status)
         },
     )?;
