@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -93,7 +94,7 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         onRawLine: (String) -> Unit = {},
     ): Result<kotlinx.serialization.json.JsonElement> {
         val entryId = "cmd_${System.nanoTime()}"
-        return execCore(
+        return runner.run(
             args = args,
             requireRoot = requireRoot,
             timeoutSeconds = timeoutSeconds,
