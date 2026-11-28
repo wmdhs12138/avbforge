@@ -110,6 +110,7 @@ fun AvbForgeApp(
     var tab by remember { mutableIntStateOf(0) }
     var showAbout by remember { mutableStateOf(false) }
     var showTerminal by remember { mutableStateOf(false) }
+    var pendingOpenAddKey by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -311,12 +312,18 @@ fun AvbForgeApp(
                             1 -> PartitionManagerScreen(
                                 state = state,
                                 vm = vm,
+                                autoOpenAddKey = pendingOpenAddKey,
+                                onAutoOpenAddKeyConsumed = { pendingOpenAddKey = false },
                                 onNotify = notify,
                             )
                             2 -> DsuManagerScreen(
                                 state = state,
                                 vm = vm,
                                 onGoPartitions = { tab = 1 },
+                                onGoConfigureKey = {
+                                    pendingOpenAddKey = true
+                                    tab = 1
+                                },
                                 onNotify = notify,
                             )
                         }

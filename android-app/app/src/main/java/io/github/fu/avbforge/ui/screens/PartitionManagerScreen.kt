@@ -54,6 +54,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -100,6 +102,8 @@ private val ALL_TARGET_PARTITIONS = listOf(
 fun PartitionManagerScreen(
     state: UiState,
     vm: AvbForgeViewModel,
+    autoOpenAddKey: Boolean = false,
+    onAutoOpenAddKeyConsumed: () -> Unit = {},
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -113,6 +117,17 @@ fun PartitionManagerScreen(
 
     // Modals & sheets
     var showAddKeySheet by remember { mutableStateOf(false) }
+    var addKeyInitialMode by remember { mutableIntStateOf(0) }
+    var missingKeyReason by remember { mutableStateOf<String?>(null) }
+    val isYellow = snap?.verifiedBootState.equals("yellow", ignoreCase = true)
+
+    LaunchedEffect(autoOpenAddKey) {
+        if (autoOpenAddKey) {
+            addKeyInitialMode = if (isYellow) 1 else 0
+            showAddKeySheet = true
+            onAutoOpenAddKeyConsumed()
+        }
+    }
     var showKeyVaultSheet by remember { mutableStateOf(false) }
     var pendingDeleteKey by remember { mutableStateOf<KeyEntry?>(null) }
 
@@ -293,13 +308,19 @@ fun PartitionManagerScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            HeroActionMiniButton(Icons.Rounded.Add, "生成", Modifier.weight(1f)) { showAddKeySheet = true }
-                            HeroActionMiniButton(Icons.Rounded.UploadFile, "导入", Modifier.weight(1f)) { showAddKeySheet = true }
+                            HeroActionMiniButton(Icons.Rounded.Add, "生成", Modifier.weight(1f)) {
+                                addKeyInitialMode = 0
+                                showAddKeySheet = true
+                            }
+                            HeroActionMiniButton(Icons.Rounded.UploadFile, "导入", Modifier.weight(1f)) {
+                                addKeyInitialMode = 1
+                                showAddKeySheet = true
+                            }
                             HeroActionMiniButton(Icons.Rounded.Share, "导出", Modifier.weight(1f)) {
                                 defaultKey?.let {
                                     vm.exportPkmdToDownloads(it)
                                     onNotify("已导出 ${it.alias}_avb_pkmd.bin")
-                                } ?: onNotify("请先生成或导入私钥")
+                                } ?: run { missingKeyReason = "导出公钥需要先配置签名私钥" }
                             }
                             HeroActionMiniButton(Icons.Rounded.Tune, "管理", Modifier.weight(1f)) { showKeyVaultSheet = true }
                         }
@@ -315,8 +336,11 @@ fun PartitionManagerScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Button(
-                    onClick = { showRootBootMenu = true },
-                    enabled = !state.busy && defaultKey != null,
+                    onClick = {
+                        if (defaultKey == null) missingKeyReason = "Root / Boot 维护需要签名私钥"
+                        else showRootBootMenu = true
+                    },
+                    enabled = !state.busy,
                     shape = RoundedCornerShape(18.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -331,12 +355,16 @@ fun PartitionManagerScreen(
 
                 Button(
                     onClick = {
-                        if (fullChainStockDir.isBlank()) {
-                            fullChainStockDir = state.localPartitionBackups.firstOrNull()?.path ?: ""
+                        if (defaultKey == null) {
+                            missingKeyReason = "全链自签名需要签名私钥"
+                        } else {
+                            if (fullChainStockDir.isBlank()) {
+                                fullChainStockDir = state.localPartitionBackups.firstOrNull()?.path ?: ""
+                            }
+                            showFullChainDialog = true
                         }
-                        showFullChainDialog = true
                     },
-                    enabled = !state.busy && defaultKey != null,
+                    enabled = !state.busy,
                     shape = RoundedCornerShape(18.dp),
                     modifier = Modifier.weight(1f),
                 ) {
@@ -565,6 +593,7 @@ fun PartitionManagerScreen(
     if (showAddKeySheet) {
         AddKeyBottomSheet(
             busy = state.busy,
+            initialMode = addKeyInitialMode,
             onGenerate = { alias, bits ->
                 vm.generateKey(alias, bits)
                 showAddKeySheet = false
@@ -1139,8 +1168,12 @@ fun PartitionManagerScreen(
                 Button(
                     onClick = {
                         activeSinglePart = null
-                        singlePartFlashTarget = part.name
-                        singlePartImgPicker.launch(arrayOf("*/*"))
+                        if (autoSignAndVerify && defaultKey == null) {
+                            missingKeyReason = "开启自动签名刷入需要配置签名私钥"
+                        } else {
+                            singlePartFlashTarget = part.name
+                            singlePartImgPicker.launch(arrayOf("*/*"))
+                        }
                     },
                     enabled = !state.busy && part.name != "devinfo",
                 ) {
@@ -1159,6 +1192,37 @@ fun PartitionManagerScreen(
                     }) { Text("备份此分区") }
                     TextButton(onClick = { activeSinglePart = null }) { Text("取消") }
                 }
+            },
+        )
+    }
+
+    // Missing Key Guidance Dialog
+    missingKeyReason?.let { reason ->
+        val hint = if (isYellow) {
+            "当前为 Yellow 自签名系统，请导入与本机 vbmeta 对应的 PEM 私钥（或生成新密钥用于重新全链自签名）。"
+        } else {
+            "请先生成新密钥，或导入已有的标准 PEM 私钥。"
+        }
+        AlertDialog(
+            onDismissRequest = { missingKeyReason = null },
+            title = { Text("尚未配置签名私钥") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(reason, style = MaterialTheme.typography.bodyMedium)
+                    Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        missingKeyReason = null
+                        addKeyInitialMode = if (isYellow) 1 else 0
+                        showAddKeySheet = true
+                    },
+                ) { Text(if (isYellow) "去导入 / 生成私钥" else "去生成 / 导入私钥") }
+            },
+            dismissButton = {
+                TextButton(onClick = { missingKeyReason = null }) { Text("取消") }
             },
         )
     }

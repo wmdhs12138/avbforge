@@ -47,13 +47,14 @@ import java.io.File
 @Composable
 fun AddKeyBottomSheet(
     busy: Boolean,
+    initialMode: Int = 0,
     onGenerate: (alias: String, bits: Int) -> Unit,
     onImport: (alias: String, path: String, pass: String?) -> Unit,
     onPickFile: (Uri) -> String?,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var mode by remember { mutableIntStateOf(0) }
+    var mode by remember(initialMode) { mutableIntStateOf(initialMode) }
     var genAlias by remember { mutableStateOf("neo9-avb") }
     var bitIdx by remember { mutableIntStateOf(0) }
     val bits = listOf(2048, 4096)

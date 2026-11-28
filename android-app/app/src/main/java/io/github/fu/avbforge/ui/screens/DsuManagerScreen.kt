@@ -77,6 +77,7 @@ fun DsuManagerScreen(
     state: UiState,
     vm: AvbForgeViewModel,
     onGoPartitions: () -> Unit,
+    onGoConfigureKey: () -> Unit = onGoPartitions,
     onNotify: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -95,6 +96,7 @@ fun DsuManagerScreen(
 
     // Modals
     var showPubkeyDialog by remember { mutableStateOf(false) }
+    var missingKeyReason by remember { mutableStateOf<String?>(null) }
     var showFlashDialog by remember { mutableStateOf(false) }
     var flashImagePath by remember { mutableStateOf(state.localGsiImages.firstOrNull()?.path ?: "") }
     var showSignDialog by remember { mutableStateOf(false) }
@@ -383,7 +385,10 @@ fun DsuManagerScreen(
                         text = "+ 签名新镜像",
                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable(enabled = !state.busy) { showSignDialog = true },
+                        modifier = Modifier.clickable(enabled = !state.busy) {
+                            if (defaultKey == null) missingKeyReason = "签名 GSI 镜像需要先配置签名私钥"
+                            else showSignDialog = true
+                        },
                     )
                 }
 
@@ -562,6 +567,35 @@ fun DsuManagerScreen(
         }
     }
 
+    // Missing Key Guidance Dialog
+    missingKeyReason?.let { reason ->
+        AlertDialog(
+            onDismissRequest = { missingKeyReason = null },
+            title = { Text("尚未配置签名私钥") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(reason, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "将跳转到「分区管理」导入与本机 vbmeta 对应的 PEM 私钥，或生成新密钥。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        missingKeyReason = null
+                        onGoConfigureKey()
+                    },
+                ) { Text("前往配置私钥") }
+            },
+            dismissButton = {
+                TextButton(onClick = { missingKeyReason = null }) { Text("取消") }
+            },
+        )
+    }
+
     // DSU Pubkey Dedicated Management Dialog
     if (showPubkeyDialog) {
         AlertDialog(
@@ -591,10 +625,20 @@ fun DsuManagerScreen(
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = { vm.prepareDsuInitBoot(targetKeyName) },
-                    enabled = !state.busy && defaultKey != null,
-                ) { Text("① 注入公钥并重签") }
+                if (defaultKey == null) {
+                    Button(
+                        onClick = {
+                            showPubkeyDialog = false
+                            onGoConfigureKey()
+                        },
+                        enabled = !state.busy,
+                    ) { Text("前往配置私钥") }
+                } else {
+                    Button(
+                        onClick = { vm.prepareDsuInitBoot(targetKeyName) },
+                        enabled = !state.busy,
+                    ) { Text("① 注入公钥并重签") }
+                }
             },
             dismissButton = { TextButton(onClick = { showPubkeyDialog = false }) { Text("关闭") } },
         )
@@ -685,13 +729,22 @@ fun DsuManagerScreen(
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        showSignDialog = false
-                        vm.signGsiImage(signImagePath, fixVendorGenfs = fixVendorGenfs)
-                    },
-                    enabled = signImagePath.isNotBlank() && !state.busy && defaultKey != null,
-                ) { Text("开始签名") }
+                if (defaultKey == null) {
+                    Button(
+                        onClick = {
+                            showSignDialog = false
+                            onGoConfigureKey()
+                        },
+                    ) { Text("前往配置私钥") }
+                } else {
+                    Button(
+                        onClick = {
+                            showSignDialog = false
+                            vm.signGsiImage(signImagePath, fixVendorGenfs = fixVendorGenfs)
+                        },
+                        enabled = signImagePath.isNotBlank() && !state.busy,
+                    ) { Text("开始签名") }
+                }
             },
             dismissButton = { TextButton(onClick = { showSignDialog = false }) { Text("取消") } },
         )
@@ -707,8 +760,12 @@ fun DsuManagerScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
                         activeLocalImg = null
-                        signImagePath = img.path
-                        showSignDialog = true
+                        if (defaultKey == null) {
+                            missingKeyReason = "签名 GSI 镜像需要先配置签名私钥"
+                        } else {
+                            signImagePath = img.path
+                            showSignDialog = true
+                        }
                     }) { Text("签名") }
                     Button(onClick = {
                         activeLocalImg = null
