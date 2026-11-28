@@ -260,11 +260,26 @@ fun PartitionManagerScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-                                    Text(
-                                        text = "公钥 SHA-1 指纹",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                    val matchesDevice = !snap?.vbmetaPubkeySha1.isNullOrBlank() &&
+                                        defaultKey.sha1.equals(snap?.vbmetaPubkeySha1, ignoreCase = true)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = "公钥 SHA-1 指纹",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        if (!snap?.vbmetaPubkeySha1.isNullOrBlank()) {
+                                            Text(
+                                                text = if (matchesDevice) "✓ 与本机 vbmeta 一致" else "⚠ 与本机不一致",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                color = if (matchesDevice) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
                                     Text(
                                         text = defaultKey.sha1,
                                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
@@ -311,7 +326,7 @@ fun PartitionManagerScreen(
                 ) {
                     Icon(Icons.Rounded.Memory, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Root / Boot 维护", style = MaterialTheme.typography.labelLarge)
+                    Text("Root / Boot", style = MaterialTheme.typography.labelLarge, maxLines = 1)
                 }
 
                 Button(
