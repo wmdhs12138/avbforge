@@ -675,6 +675,13 @@ fun DsuManagerScreen(
                         Checkbox(checked = fixVendorGenfs, onCheckedChange = { fixVendorGenfs = it })
                         Text("自动修复 SELinux genfscon 冲突", style = MaterialTheme.typography.bodySmall)
                     }
+                    if (defaultKey == null) {
+                        Text(
+                            text = "尚未配置默认私钥，请先在「分区管理」生成或导入私钥",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
             },
             confirmButton = {

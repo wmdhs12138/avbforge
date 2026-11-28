@@ -657,30 +657,63 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun isGsiFilename(name: String): Boolean {
+        if (name.startsWith(".")) return false
+        return name.endsWith(".img", ignoreCase = true) ||
+            name.endsWith(".img.xz", ignoreCase = true) ||
+            name.endsWith(".img.gz", ignoreCase = true) ||
+            name.endsWith(".xz", ignoreCase = true) ||
+            name.endsWith(".gz", ignoreCase = true)
+    }
+
     private fun scanLocalGsiImages(): List<LocalGsiImage> {
-        val dir = baseWorkDir
         val minGsiBytes = 100L * 1024L * 1024L // Filter out 8MB init_boot / small boot images
-        val files = dir.listFiles().orEmpty()
-        return files
-            .filter { f ->
-                f.isFile &&
-                    !f.name.startsWith(".") &&
-                    f.length() >= minGsiBytes &&
-                    (f.name.endsWith(".img", ignoreCase = true) ||
-                        f.name.endsWith(".img.xz", ignoreCase = true) ||
-                        f.name.endsWith(".img.gz", ignoreCase = true) ||
-                        f.name.endsWith(".xz", ignoreCase = true) ||
-                        f.name.endsWith(".gz", ignoreCase = true))
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val scanDirs = listOf(baseWorkDir, downloadsDir)
+        val found = LinkedHashMap<String, LocalGsiImage>()
+
+        for (dir in scanDirs) {
+            dir.listFiles().orEmpty().forEach { f ->
+                if (f.isFile && f.length() >= minGsiBytes && isGsiFilename(f.name)) {
+                    found[f.absolutePath] = LocalGsiImage(
+                        name = f.name,
+                        path = f.absolutePath,
+                        sizeBytes = f.length(),
+                        lastModified = f.lastModified(),
+                    )
+                }
             }
-            .sortedByDescending { it.lastModified() }
-            .map { f ->
-                LocalGsiImage(
-                    name = f.name,
-                    path = f.absolutePath,
-                    sizeBytes = f.length(),
-                    lastModified = f.lastModified(),
-                )
+        }
+
+        if (found.isEmpty()) {
+            runCatching {
+                val cmd = "for d in '${baseWorkDir.absolutePath}' '${downloadsDir.absolutePath}'; do " +
+                    "for f in \"\$d\"/*; do [ -f \"\$f\" ] && stat -c '%n|%s|%Y' \"\$f\"; done; done 2>/dev/null"
+                val proc = ProcessBuilder("su", "-c", cmd).redirectErrorStream(false).start()
+                proc.inputStream.bufferedReader().useLines { seq ->
+                    seq.forEach { line ->
+                        val parts = line.trim().split('|')
+                        if (parts.size == 3) {
+                            val path = parts[0]
+                            val sz = parts[1].toLongOrNull() ?: 0L
+                            val mtimeSec = parts[2].toLongOrNull() ?: 0L
+                            val name = File(path).name
+                            if (sz >= minGsiBytes && isGsiFilename(name) && !found.containsKey(path)) {
+                                found[path] = LocalGsiImage(
+                                    name = name,
+                                    path = path,
+                                    sizeBytes = sz,
+                                    lastModified = mtimeSec * 1000L,
+                                )
+                            }
+                        }
+                    }
+                }
+                proc.waitFor()
             }
+        }
+
+        return found.values.sortedByDescending { it.lastModified }
     }
 
     fun refreshLocalGsiImages() {
