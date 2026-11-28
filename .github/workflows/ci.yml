@@ -26,10 +26,14 @@ jobs:
 
       - name: Download official AOSP avbtool.py
         run: |
-          curl -fSL "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
-            | base64 -d > /tmp/avbtool.py
+          set -euo pipefail
+          curl -fSL --retry 5 --retry-delay 3 --retry-all-errors \
+            "https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py?format=TEXT" \
+            -o /tmp/avbtool.b64
+          base64 -d /tmp/avbtool.b64 > /tmp/avbtool.py
+          test -s /tmp/avbtool.py
           chmod +x /tmp/avbtool.py
-          python3 /tmp/avbtool.py version
+          python3 /tmp/avbtool.py version | grep -q "avbtool"
 
       - name: Run bidirectional avbtool.py cross-verification
         run: |
