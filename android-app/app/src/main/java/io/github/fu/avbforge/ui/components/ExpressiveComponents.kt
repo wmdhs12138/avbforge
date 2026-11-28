@@ -596,9 +596,12 @@ fun M3EFloatingNavBar(
             tonalElevation = 4.dp,
             shadowElevation = 10.dp,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 7.dp, vertical = 6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -619,6 +622,7 @@ fun M3EFloatingNavBar(
                         shape = CircleShape,
                         color = bg,
                         modifier = Modifier
+                            .weight(1f)
                             .clip(CircleShape)
                             .clickable {
                                 if (!selected) {
@@ -627,27 +631,19 @@ fun M3EFloatingNavBar(
                                 }
                             },
                     ) {
-                        Row(
-                            modifier = Modifier.padding(
-                                horizontal = if (selected || items.size <= 3) 20.dp else 14.dp,
-                                vertical = 10.dp,
-                            ),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        Column(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
-                            Icon(item.icon, contentDescription = item.label, tint = fg, modifier = Modifier.size(21.dp))
-                            AnimatedVisibility(
-                                visible = selected || items.size <= 3,
-                                enter = expandHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(180)),
-                                exit = shrinkHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut(tween(120)),
-                            ) {
-                                Text(
-                                    text = item.label,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = fg,
-                                    maxLines = 1,
-                                )
-                            }
+                            Icon(item.icon, contentDescription = item.label, tint = fg, modifier = Modifier.size(20.dp))
+                            Text(
+                                text = item.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = fg,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }

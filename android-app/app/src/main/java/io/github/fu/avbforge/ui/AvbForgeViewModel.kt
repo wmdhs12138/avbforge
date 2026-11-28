@@ -2,6 +2,8 @@ package io.github.fu.avbforge.ui
 
 import android.app.Application
 import android.content.Context
+import android.media.MediaDrm
+import java.util.UUID
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -77,6 +79,16 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _terminalEntries = MutableStateFlow<List<TerminalCommandEntry>>(emptyList())
     val terminalEntries: StateFlow<List<TerminalCommandEntry>> = _terminalEntries.asStateFlow()
+
+    private fun readWidevineLevel(): String = runCatching {
+        val widevineUuid = UUID(-0x121074568629b532L, -0x5c37d8232ae2de13L)
+        val drm = MediaDrm(widevineUuid)
+        try {
+            drm.getPropertyString("securityLevel").ifBlank { "Unknown" }
+        } finally {
+            drm.close()
+        }
+    }.getOrDefault("Unknown")
 
     private fun nowTime(): String =
         SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -185,7 +197,11 @@ class AvbForgeViewModel(app: Application) : AndroidViewModel(app) {
                 onLog = ::appendLog,
             )
             res.onSuccess { elem ->
-                val snap = runner.json.decodeFromJsonElement<DeviceSnapshot>(elem)
+                val rawSnap = runner.json.decodeFromJsonElement<DeviceSnapshot>(elem)
+                val widevine = if (rawSnap.widevineLevel.isBlank() || rawSnap.widevineLevel.equals("Unknown", ignoreCase = true)) {
+                    readWidevineLevel()
+                } else rawSnap.widevineLevel
+                val snap = rawSnap.copy(widevineLevel = widevine)
                 _state.update {
                     it.copy(
                         busy = false,

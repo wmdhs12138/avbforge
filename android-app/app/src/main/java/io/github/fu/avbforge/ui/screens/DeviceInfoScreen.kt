@@ -272,8 +272,8 @@ fun DeviceInfoScreen(
                     InfoKeyValueRow(
                         icon = Icons.Rounded.VerifiedUser,
                         label = "DSU 公钥",
-                        value = snap?.initBootAvbpubkeys?.firstOrNull()?.ifBlank { null }
-                            ?: snap?.fstabAvbKeys?.firstOrNull()
+                        value = snap?.initBootAvbpubkeys?.firstOrNull()?.substringAfterLast('/')?.let { "/avb/$it" }
+                            ?: snap?.fstabAvbKeys?.firstOrNull()?.substringAfterLast('/')?.let { "/avb/$it" }
                             ?: "未注入",
                         mono = true,
                     )

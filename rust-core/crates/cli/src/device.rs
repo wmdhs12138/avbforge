@@ -754,12 +754,16 @@ fn detect_widevine_level() -> String {
 fn detect_root_provider(ksu_version: Option<&str>) -> Option<String> {
     if let Some(kv) = ksu_version.filter(|s| !s.is_empty()) {
         let lower = kv.to_lowercase();
+        let ver = kv
+            .split_whitespace()
+            .find(|tok| tok.chars().next().map(|c| c.is_ascii_digit() || c == 'v').unwrap_or(false))
+            .unwrap_or(kv);
         let label = if lower.contains("suki") {
-            format!("SukiSU ({})", kv.split_whitespace().next().unwrap_or(kv))
+            format!("SukiSU {ver}")
         } else if lower.contains("next") {
-            format!("KernelSU Next ({})", kv.split_whitespace().next().unwrap_or(kv))
+            format!("KernelSU Next {ver}")
         } else {
-            format!("KernelSU {}", kv.split_whitespace().next().unwrap_or(kv))
+            format!("KernelSU {ver}")
         };
         return Some(label);
     }
