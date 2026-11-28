@@ -356,8 +356,8 @@ fun UpdateKsuWizard(
         val signedName = File(state.lastKsuUpdateReport.outputPath).name
         val plannedCommands = listOf(
             "avbforge-core avb verify --image $signedName --expected-pubkey ${defaultKey?.alias ?: "default"}_pkmd.bin",
-            "su -c "avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $signedName --fsync"",
-            "su -c "avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot"",
+            "su -c 'avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $signedName --fsync'",
+            "su -c 'avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot'",
         )
         DryRunCommandDialog(
             title = "刷前命令预演确认（init_boot）",

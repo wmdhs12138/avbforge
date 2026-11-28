@@ -617,8 +617,8 @@ fun FirstTimeSelfSignWizard(
         val bundleName = File(rep.outputDir).name
         val plannedCommands = listOf(
             "avbforge-core avb verify --image $bundleName/vbmeta.img --follow-chain",
-            "su -c "avbforge-core flash-bundle --bundle-dir $bundleName --slot $displaySlot --fsync"",
-            "su -c "avbforge-core verify-readback --slot $displaySlot (${rep.signedPartitions.joinToString(", ")})"",
+            "su -c 'avbforge-core flash-bundle --bundle-dir $bundleName --slot $displaySlot --fsync'",
+            "su -c 'avbforge-core verify-readback --slot $displaySlot (${rep.signedPartitions.joinToString(", ")})'",
         )
         DryRunCommandDialog(
             title = "刷前命令预演确认（全套自签名包）",

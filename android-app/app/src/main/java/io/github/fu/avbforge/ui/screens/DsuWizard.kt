@@ -730,8 +730,8 @@ fun DsuWizard(
             safetySummary = "活动槽位 $activeSlot · 保留 KernelSU · 注入 $targetKeyName · 不清空用户数据",
             plannedCommands = listOf(
                 "avbforge-core avb verify --image $imgName --expected-pubkey ${defaultKey?.alias ?: "default"}_pkmd.bin",
-                "su -c "avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $imgName --fsync"",
-                "su -c "avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot"",
+                "su -c 'avbforge-core flash-partition --partition init_boot --slot $activeSlot --image $imgName --fsync'",
+                "su -c 'avbforge-core verify-readback --device /dev/block/by-name/init_boot$activeSlot'",
             ),
             onConfirm = {
                 confirmFlashDsuInit = false
@@ -752,9 +752,9 @@ fun DsuWizard(
             safetySummary = "独立 Userdata ${gib} GiB · ${if (singleBoot) "单次防变砖启动 (-s)" else "持续启动模式"} · 不修改原厂 OriginOS 分区",
             plannedCommands = listOf(
                 "avbforge-core avb verify --image $imgName",
-                "su -c "avbforge-core dsu stage --image $imgName -> /data/gsi/"",
-                "su -c "gsi_tool install --gsi-size ${rep.finalSize} --userdata-size $userdataBytes --wipe --no-reboot"",
-                "su -c "$enableCmd"",
+                "su -c 'avbforge-core dsu stage --image $imgName -> /data/gsi/'",
+                "su -c 'gsi_tool install --gsi-size ${rep.finalSize} --userdata-size $userdataBytes --wipe --no-reboot'",
+                "su -c '$enableCmd'",
             ),
             onConfirm = {
                 confirmInstallDsu = false
